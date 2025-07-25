@@ -8,8 +8,7 @@ COPY requirements.txt .
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
-    wget \ # Added wget as it's used for ta-lib download
-    && rm -rf /var/lib/apt/lists/*
+    wget && rm -rf /var/lib/apt/lists/* # Fixed: Chained commands on one logical line
 # Install ta-lib C library
 RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     tar -xzf ta-lib-0.4.0-src.tar.gz && \
