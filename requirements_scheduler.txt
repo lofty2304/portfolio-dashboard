@@ -1,0 +1,9 @@
+aiohttp
+pandas
+numpy
+beautifulsoup4
+backoff
+ratelimit
+aiosqlite
+gspread
+google-auth-oauthlib
