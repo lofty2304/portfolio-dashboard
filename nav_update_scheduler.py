@@ -10,11 +10,14 @@ import re
 import shutil
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
-# from apscheduler.schedulers.blocking import BlockingScheduler # Removed for GitHub Actions
 import backoff
 import ratelimit
 import aiosqlite
 import json
+
+# For Google Sheets Integration
+import gspread
+from google.oauth2.service_account import Credentials
 
 # === Setup Logging ===
 logging.basicConfig(
@@ -27,22 +30,23 @@ logging.basicConfig(
 # === Config Class with Fixed Structure ===
 class Config:
     # Base paths and settings (define these first)
-    DATA_DIR: str = "src/data"
-    # SCHEDULE_HOUR: int = 18  # 6 PM IST - No longer needed for single-run job
-    # SCHEDULE_MINUTE: int = 30 # No longer needed for single-run job
+    DATA_DIR: str = "src/data" # Still used for NAV history and cache DB
     RETRY_ATTEMPTS: int = 3
     REQUEST_TIMEOUT: int = 10
     RATE_LIMIT: int = 2
 
     class Files:
-        # Now we can reference Config.DATA_DIR since it's defined above
-        NIFTY_CSV: str = f"{Config.DATA_DIR}/nifty.csv"
-        GOLD_CSV: str = f"{Config.DATA_DIR}/gold.csv"
-        CURRENCY_CSV: str = f"{Config.DATA_DIR}/currency.csv"
-        NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv"
-        FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx"
+        # Local files (NAV history and cache DB might still be local or pushed to GitHub)
+        NAV_HISTORY_CSV: str = f"{DATA_DIR}/nav_history.csv"
+        FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx" # If still used locally
         FUND_SHEET: str = "Fund Tracker"
-        CACHE_DB: str = f"{Config.DATA_DIR}/cache.db" # Added cache DB path
+        CACHE_DB: str = f"{DATA_DIR}/cache.db"
+
+        # Google Sheet IDs - REPLACE WITH YOUR ACTUAL GOOGLE SHEET IDs
+        # Create separate Google Sheets for Nifty, Gold, Currency, and share them with the Service Account email.
+        NIFTY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NIFTY_ID", "YOUR_NIFTY_SHEET_ID")
+        GOLD_SHEET_ID: str = os.getenv("GOOGLE_SHEET_GOLD_ID", "YOUR_GOLD_SHEET_ID")
+        CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
 
     class URLs:
         INVESTING_BASE: str = "https://www.investing.com"
@@ -119,36 +123,59 @@ class DataCache:
                 )
         return None
 
-class DataFetcher:
-    def __init__(self, cache: DataCache):
-        self.session = None
-        self.cache = cache
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-
-    async def __aenter__(self):
-        self.session = aiohttp.ClientSession(headers=self.headers)
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
-
-    @backoff.on_exception(backoff.expo, aiohttp.ClientError, max_tries=Config.RETRY_ATTEMPTS)
-    @ratelimit.limits(calls=Config.RATE_LIMIT, period=1)
-    async def fetch_url(self, url: str) -> Optional[str]:
+class GoogleSheetsManager:
+    def __init__(self, service_account_info: str):
+        # service_account_info is expected to be a JSON string
         try:
-            async with self.session.get(url, timeout=Config.REQUEST_TIMEOUT) as response:
-                response.raise_for_status()
-                return await response.text()
+            creds_json = json.loads(service_account_info)
+            self.credentials = Credentials.from_service_account_info(
+                creds_json,
+                scopes=['https://www.googleapis.com/auth/spreadsheets']
+            )
+            self.client = gspread.authorize(self.credentials)
+            logging.info("Google Sheets API client authorized.")
         except Exception as e:
-            logging.error(f"Failed to fetch {url}: {str(e)}")
-            return None
+            logging.error(f"Failed to authorize Google Sheets API client: {e}")
+            raise
+
+    def append_data(self, sheet_id: str, sheet_name: str, data: List[List[Any]]) -> bool:
+        """Appends a list of rows to the specified Google Sheet."""
+        try:
+            spreadsheet = self.client.open_by_key(sheet_id)
+            worksheet = spreadsheet.worksheet(sheet_name)
+            worksheet.append_rows(data, value_input_option='USER_ENTERED')
+            logging.info(f"Successfully appended {len(data)} rows to {sheet_name} in sheet {sheet_id}.")
+            return True
+        except gspread.exceptions.SpreadsheetNotFound:
+            logging.error(f"Spreadsheet with ID '{sheet_id}' not found. Check ID and sharing permissions.")
+            return False
+        except gspread.exceptions.WorksheetNotFound:
+            logging.error(f"Worksheet '{sheet_name}' not found in spreadsheet {sheet_id}.")
+            return False
+        except Exception as e:
+            logging.error(f"Failed to append data to Google Sheet {sheet_id}/{sheet_name}: {e}")
+            return False
+
+    def get_all_records(self, sheet_id: str, sheet_name: str) -> List[Dict[str, Any]]:
+        """Reads all records from a Google Sheet as a list of dictionaries."""
+        try:
+            spreadsheet = self.client.open_by_key(sheet_id)
+            worksheet = spreadsheet.worksheet(sheet_name)
+            return worksheet.get_all_records() # Returns list of dicts, first row as headers
+        except gspread.exceptions.SpreadsheetNotFound:
+            logging.error(f"Spreadsheet with ID '{sheet_id}' not found. Check ID and sharing permissions.")
+            return []
+        except gspread.exceptions.WorksheetNotFound:
+            logging.error(f"Worksheet '{sheet_name}' not found in spreadsheet {sheet_id}.")
+            return []
+        except Exception as e:
+            logging.error(f"Failed to read data from Google Sheet {sheet_id}/{sheet_name}: {e}")
+            return []
 
 class DataUpdater:
-    def __init__(self, cache: DataCache):
+    def __init__(self, cache: DataCache, gs_manager: GoogleSheetsManager):
         self.cache = cache
+        self.gs_manager = gs_manager
         self.ensure_directories()
 
     @staticmethod
@@ -157,65 +184,78 @@ class DataUpdater:
 
     def _safe_merge_csv(self, filepath: str, new_df: pd.DataFrame, 
                         key_cols: List[str], date_fmt: Optional[str] = None) -> None:
+        """
+        Merges new DataFrame with existing CSV, drops duplicates, and sorts.
+        This is still used for NAV history if kept locally.
+        """
         try:
             if os.path.exists(filepath):
-                backup_path = filepath.replace('.csv', f'_backup_{datetime.now():%Y%m%d_%H%M%S}.csv')
-                shutil.copy2(filepath, backup_path)
+                # Optional: backup old file before merging
+                # backup_path = filepath.replace('.csv', f'_backup_{datetime.now():%Y%m%d_%H%M%S}.csv')
+                # shutil.copy2(filepath, backup_path)
 
-            try:
-                existing_df = pd.read_csv(filepath)
-            except FileNotFoundError:
+                try:
+                    existing_df = pd.read_csv(filepath)
+                except FileNotFoundError: # Should not happen if os.path.exists is true
+                    existing_df = pd.DataFrame() # Start with empty if file somehow disappeared
+
+                combined = pd.concat([existing_df, new_df])
+                combined = combined.drop_duplicates(subset=key_cols, keep='last')
+
+                if date_fmt:
+                    # Convert to datetime, handle errors, then sort
+                    combined['_sort_date'] = pd.to_datetime(combined[key_cols[0]], format=date_fmt, errors='coerce')
+                    combined = combined.dropna(subset=['_sort_date']) # Drop rows where date conversion failed
+                    combined = combined.sort_values('_sort_date').drop(columns=['_sort_date'])
+
+                combined.to_csv(filepath, index=False)
+                logging.info(f"Successfully merged data into local CSV: {filepath}")
+            else:
                 new_df.to_csv(filepath, index=False)
-                return
-
-            combined = pd.concat([existing_df, new_df])
-            combined = combined.drop_duplicates(subset=key_cols, keep='last')
-
-            if date_fmt:
-                combined['_sort_date'] = pd.to_datetime(combined[key_cols[0]], format=date_fmt)
-                combined = combined.sort_values('_sort_date').drop(columns=['_sort_date'])
-
-            combined.to_csv(filepath, index=False)
+                logging.info(f"Created new local CSV: {filepath}")
 
         except Exception as e:
             logging.error(f"Failed to merge CSV {filepath}: {str(e)}")
             raise
 
     async def update_nifty(self, fetcher: DataFetcher) -> bool:
+        logging.info("Starting Nifty update for Google Sheet...")
         try:
             html = await fetcher.fetch_url(f"{Config.URLs.INVESTING_BASE}/indices/s-p-cnx-nifty")
             if not html:
+                logging.warning("No HTML fetched for Nifty.")
                 return False
 
             match = re.search(r'last\">(\d{4,5}\.\d+)', html)
             if not match:
+                logging.warning("Could not parse Nifty price from HTML.")
                 return False
 
             price = float(match.group(1))
-            today = datetime.now().strftime("%d-%b-%y")
+            today_str = datetime.now().strftime("%Y-%m-%d") # Use YYYY-MM-DD for Sheets
+
+            # Append to Google Sheet
+            # Ensure your Google Sheet has columns like "Date", "Close"
+            data_row = [today_str, price]
+            success = self.gs_manager.append_data(Config.Files.NIFTY_SHEET_ID, "Sheet1", [data_row]) # Assuming "Sheet1"
             
-            data = MarketData(
-                timestamp=datetime.now(),
-                value=price,
-                source="investing.com"
-            )
-            await self.cache.set("nifty", data)
-            
-            df = pd.DataFrame([{"Date": today, "Close": price}])
-            self._safe_merge_csv(Config.Files.NIFTY_CSV, df, ["Date"], "%d-%b-%y")
-            
-            logging.info(f"Updated Nifty price: {price}")
-            return True
+            if success:
+                logging.info(f"Updated Nifty price: {price} to Google Sheet.")
+            else:
+                logging.error(f"Failed to write Nifty price {price} to Google Sheet.")
+            return success
 
         except Exception as e:
             logging.error(f"Nifty update failed: {str(e)}")
             return False
 
     async def update_gold(self, fetcher: DataFetcher) -> bool:
+        logging.info("Starting Gold update for Google Sheet...")
         for url in Config.URLs.GOLD_URLS:
             try:
                 html = await fetcher.fetch_url(url)
                 if not html:
+                    logging.warning(f"No HTML fetched for Gold from {url}.")
                     continue
 
                 price = None
@@ -226,33 +266,39 @@ class DataUpdater:
                         price_td = tag.find_next_sibling("td")
                         if price_td and price_td.text:
                             price = float(price_td.text.strip().replace("₹", "").replace(",", "")) * 10
+                # Add more parsing logic for other gold URLs if needed
+                # elif "livemint.com" in url:
+                #     ...
+                # elif "mcxindia.com" in url:
+                #     ...
 
                 if price:
-                    today = datetime.now().strftime("%d-%m-%Y")
-                    data = MarketData(
-                        timestamp=datetime.now(),
-                        value=price,
-                        source=url
-                    )
-                    await self.cache.set("gold", data)
+                    today_str = datetime.now().strftime("%Y-%m-%d")
+
+                    # Append to Google Sheet
+                    # Ensure your Google Sheet has columns like "Date", "Price", "Source"
+                    data_row = [today_str, price, url]
+                    success = self.gs_manager.append_data(Config.Files.GOLD_SHEET_ID, "Sheet1", [data_row]) # Assuming "Sheet1"
                     
-                    df = pd.DataFrame([{"Date": today, "Price": price}])
-                    self._safe_merge_csv(Config.Files.GOLD_CSV, df, ["Date"], "%d-%m-%Y")
-                    
-                    logging.info(f"Updated Gold price: ₹{price} from {url}")
-                    return True
+                    if success:
+                        logging.info(f"Updated Gold price: ₹{price} from {url} to Google Sheet.")
+                        return True # Return True as soon as one source succeeds
+                    else:
+                        logging.error(f"Failed to write Gold price {price} from {url} to Google Sheet.")
+                        continue # Try next URL if writing fails
 
             except Exception as e:
                 logging.error(f"Gold update failed for {url}: {str(e)}")
                 continue
 
+        logging.error("All Gold update sources failed.")
         return False
 
-    # Placeholder for other update functions (update_currency, update_nav)
-    # You will need to implement these similarly, handling their specific scraping logic.
     async def update_currency(self, fetcher: DataFetcher) -> bool:
-        logging.info("Starting currency update...")
+        logging.info("Starting currency update for Google Sheet...")
         success_count = 0
+        all_currency_data_rows = []
+
         for currency_pair, endpoint in Config.URLs.CURRENCY_ENDPOINTS.items():
             url = f"{Config.URLs.INVESTING_BASE}{endpoint}" if not endpoint.startswith("http") else endpoint
             try:
@@ -264,31 +310,21 @@ class DataUpdater:
                 price = None
                 if "investing.com" in url:
                     soup = BeautifulSoup(html, "html.parser")
-                    # Example selector for Investing.com prices, needs verification
-                    price_tag = soup.find('div', class_='instrument-price-last')
+                    price_tag = soup.find('div', class_='instrument-price-last') # This selector needs verification
                     if price_tag:
                         price = float(price_tag.text.strip().replace(',', ''))
                 elif "coindesk.com" in url:
                     soup = BeautifulSoup(html, "html.parser")
-                    price_tag = soup.find('span', class_='currency-price')
+                    price_tag = soup.find('span', class_='currency-price') # This selector needs verification
                     if price_tag:
                         price = float(price_tag.text.strip().replace('₹', '').replace(',', ''))
 
                 if price:
-                    today = datetime.now().strftime("%Y-%m-%d")
-                    data = MarketData(
-                        timestamp=datetime.now(),
-                        value=price,
-                        source=url,
-                        metadata={"currency_pair": currency_pair}
-                    )
-                    await self.cache.set(f"currency_{currency_pair}", data)
-                    
-                    # Assuming a simple CSV structure for currency data
-                    df = pd.DataFrame([{"Date": today, "CurrencyPair": currency_pair, "Rate": price}])
-                    self._safe_merge_csv(Config.Files.CURRENCY_CSV, df, ["Date", "CurrencyPair"], "%Y-%m-%d")
-                    
-                    logging.info(f"Updated {currency_pair} rate: {price} from {url}")
+                    today_str = datetime.now().strftime("%Y-%m-%d")
+                    # Prepare row for Google Sheet
+                    # Ensure your Google Sheet has columns like "Date", "CurrencyPair", "Rate", "Source"
+                    all_currency_data_rows.append([today_str, currency_pair, price, url])
+                    logging.info(f"Prepared {currency_pair} rate: {price} from {url} for Google Sheet.")
                     success_count += 1
                 else:
                     logging.warning(f"Could not parse price for {currency_pair} from {url}")
@@ -296,7 +332,19 @@ class DataUpdater:
             except Exception as e:
                 logging.error(f"Currency update failed for {currency_pair} from {url}: {str(e)}")
                 continue
-        return success_count > 0
+        
+        if all_currency_data_rows:
+            # Append all collected currency data in one go
+            success = self.gs_manager.append_data(Config.Files.CURRENCY_SHEET_ID, "Sheet1", all_currency_data_rows) # Assuming "Sheet1"
+            if success:
+                logging.info(f"Successfully appended {success_count} currency rates to Google Sheet.")
+                return True
+            else:
+                logging.error(f"Failed to append currency data to Google Sheet.")
+                return False
+        else:
+            logging.warning("No currency data collected to append to Google Sheet.")
+            return False
 
     async def update_nav(self, fetcher: DataFetcher) -> bool:
         logging.info("Starting NAV update...")
@@ -354,7 +402,7 @@ class DataUpdater:
             df_nav = df_nav.dropna(subset=['Date'])
             df_nav['Date'] = df_nav['Date'].dt.strftime('%Y-%m-%d') # Standardize date format
 
-            # Merge with existing NAV history
+            # Merge with existing NAV history (still to local CSV for now)
             self._safe_merge_csv(Config.Files.NAV_HISTORY_CSV, df_nav, ["Date", "Fund Code"], "%Y-%m-%d")
             
             logging.info(f"Successfully updated NAV history with {len(df_nav)} records.")
@@ -365,15 +413,30 @@ class DataUpdater:
             return False
 
 async def main():
+    # Retrieve Google Service Account credentials from environment variable
+    google_sa_key_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
+    if not google_sa_key_json:
+        logging.error("GOOGLE_SERVICE_ACCOUNT_KEY environment variable not set. Cannot proceed with Google Sheets updates.")
+        return False
+
+    try:
+        gs_manager = GoogleSheetsManager(google_sa_key_json)
+    except Exception as e:
+        logging.error(f"Failed to initialize GoogleSheetsManager: {e}")
+        return False
+
     cache = DataCache(Config.Files.CACHE_DB)
-    updater = DataUpdater(cache)
+    updater = DataUpdater(cache, gs_manager)
     
+    # Ensure local data directory exists for NAV history and cache DB
+    updater.ensure_directories()
+
     async with DataFetcher(cache) as fetcher:
         tasks = [
             updater.update_nifty(fetcher),
             updater.update_gold(fetcher),
-            updater.update_currency(fetcher), # Added currency update
-            updater.update_nav(fetcher),     # Added NAV update
+            updater.update_currency(fetcher),
+            updater.update_nav(fetcher), # NAV history still updates local CSV for now
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         success = all(isinstance(r, bool) and r for r in results)
@@ -383,35 +446,8 @@ async def main():
         else:
             logging.error("Some data updates failed")
         
-        # After all updates, the CSV files in src/data will be updated locally within the container.
-        # The GitHub Actions workflow will then handle pushing these updated files to the repo.
+        # If NAV_HISTORY_CSV and CACHE_DB are still local, the workflow will handle pushing them.
         return success
 
 if __name__ == "__main__":
-    # This part is removed for GitHub Actions single-run execution
-    # scheduler = BlockingScheduler(timezone="Asia/Kolkata")
-    
-    # def scheduled_update():
-    #     asyncio.run(main())
-    
-    # # Run immediate update
-    # scheduled_update()
-    
-    # # Schedule daily updates
-    # scheduler.add_job(
-    #     scheduled_update, 
-    #     'cron', 
-    #     hour=Config.SCHEDULE_HOUR, 
-    #     minute=Config.SCHEDULE_MINUTE
-    # )
-    
-    # print(f"⏰ Scheduler running - Updates will run daily at {Config.SCHEDULE_HOUR:02d}:{Config.SCHEDULE_MINUTE:02d} IST")
-    # print("Press Ctrl+C to exit")
-    
-    # try:
-    #     scheduler.start()
-    # except (KeyboardInterrupt, SystemExit):
-    #     print("\n👋 Scheduler stopped")
-    
-    # For GitHub Actions, simply run the main function and exit
     asyncio.run(main())
