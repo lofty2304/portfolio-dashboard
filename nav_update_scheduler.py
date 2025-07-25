@@ -26,23 +26,24 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+# === Config Constants (Flat Style) ===
+DATA_DIR = "src/data"
+CACHE_DB = f"{DATA_DIR}/cache.db"
+NAV_HISTORY_CSV = f"{DATA_DIR}/nav_history.csv"
 
 # === Config Class with Fixed Structure ===
 class Config:
-    # Base paths and settings (define these first)
-    DATA_DIR: str = "src/data" # This is correctly defined here
     RETRY_ATTEMPTS: int = 3
     REQUEST_TIMEOUT: int = 10
     RATE_LIMIT: int = 2
 
     class Files:
-        # CORRECTED LINE: No asterisks around Config.DATA_DIR
-        NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv" 
-        FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx" # If still used locally
+        NAV_HISTORY_CSV: str = NAV_HISTORY_CSV
+        FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx"
         FUND_SHEET: str = "Fund Tracker"
-        CACHE_DB: str = f"{Config.DATA_DIR}/cache.db"
+        CACHE_DB: str = CACHE_DB
 
-        # Google Sheet IDs - REPLACE WITH YOUR ACTUAL GOOGLE SHEET IDs
+        # Replace with actual Google Sheet IDs or environment variables
         NIFTY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NIFTY_ID", "YOUR_NIFTY_SHEET_ID")
         GOLD_SHEET_ID: str = os.getenv("GOOGLE_SHEET_GOLD_ID", "YOUR_GOLD_SHEET_ID")
         CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
@@ -60,6 +61,7 @@ class Config:
             "BTCINR": "https://www.coindesk.com/price/bitcoin/"
         }
         AMFI_NAV: str = "https://www.amfiindia.com/spages/NAVAll.txt"
+
 
 @dataclass
 class MarketData:
