@@ -30,41 +30,38 @@ jobs:
           tags: portfolio-dashboard-scheduler:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          load: true # <--- ADD THIS LINE: Ensures the built image is loaded into the Docker daemon
 
       - name: Run Data Update Scheduler
         run: |
           docker run \
             -e EXCHANGE_RATE_API_KEY=${{ secrets.EXCHANGE_RATE_API_KEY }} \
-            -e GOOGLE_SERVICE_ACCOUNT_KEY='${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}' \ # Pass SA key as JSON string
+            -e GOOGLE_SERVICE_ACCOUNT_KEY='${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}' \
             -e GOOGLE_SHEET_NIFTY_ID=${{ secrets.GOOGLE_SHEET_NIFTY_ID }} \
             -e GOOGLE_SHEET_GOLD_ID=${{ secrets.GOOGLE_SHEET_GOLD_ID }} \
             -e GOOGLE_SHEET_CURRENCY_ID=${{ secrets.GOOGLE_SHEET_CURRENCY_ID }} \
-            -v ${{ github.workspace }}/src/data:/app/src/data \ # Mount data directory for local CSVs/DB
+            -v ${{ github.workspace }}/src/data:/app/src/data \
             portfolio-dashboard-scheduler:latest
         env:
           EXCHANGE_RATE_API_KEY: ${{ secrets.EXCHANGE_RATE_API_KEY }}
-          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }} # Also pass to env for clarity
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
           GOOGLE_SHEET_NIFTY_ID: ${{ secrets.GOOGLE_SHEET_NIFTY_ID }}
           GOOGLE_SHEET_GOLD_ID: ${{ secrets.GOOGLE_SHEET_GOLD_ID }}
           GOOGLE_SHEET_CURRENCY_ID: ${{ secrets.GOOGLE_SHEET_CURRENCY_ID }}
 
       - name: Commit and Push Remaining Updated Data to 'data' branch
-        # This step now only handles NAV history and cache DB
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -B data # Create and switch to 'data' branch
-          
-          # Add only the files that are still updated locally by the scheduler
+          git checkout -B data
           git add src/data/nav_history.csv
-          git add src/data/*.db # Add the SQLite cache DB
+          git add src/data/*.db
           
-          # Check if there are any changes to commit
           if git diff --staged --quiet; then
             echo "No changes to commit for local data files. Skipping commit."
           else
             git commit -m "Automated local data update: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-            git push origin data # Push to the 'data' branch
+            git push origin data
             echo "Successfully pushed updated local data to 'data' branch."
           fi
         env:
