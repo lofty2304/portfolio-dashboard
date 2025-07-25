@@ -54,10 +54,7 @@ class Files:
     GOLD_SHEET_ID: str = os.getenv("GOOGLE_SHEET_GOLD_ID", "YOUR_GOLD_SHEET_ID")
     CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
 
-# Nested URLs class - This class definition should be at the top-level indentation.
-# This ensures it's not accidentally nested inside another class or function,
-# which was likely the cause of the "IndentationError: unexpected indent" at line 72
-# in your workflow's `nav_update_scheduler.py` file.
+# Nested URLs class
 class URLs:
     """URLs for data fetching."""
     INVESTING_BASE: str = "https://www.investing.com"
@@ -101,28 +98,24 @@ class DataCache:
     """
     def __init__(self, db_path: str):
         self.db_path = db_path
-        # Setup DB synchronously during initialization.
-        # For a truly non-blocking setup, this could be an async method called externally.
-        self.setup_db()
+        # Database setup is now an async method and must be called with await externally.
+        # No synchronous setup in __init__ to avoid RuntimeError.
 
-    def setup_db(self):
+    async def initialize_db(self):
         """Initializes the SQLite database table if it doesn't exist."""
-        async def init_db():
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("""
-                    CREATE TABLE IF NOT EXISTS market_data (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        data_type TEXT NOT NULL,
-                        timestamp TEXT NOT NULL,
-                        data TEXT NOT NULL,
-                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(data_type, timestamp) ON CONFLICT REPLACE
-                    )
-                """)
-                await db.commit()
-        
-        # Run the async setup synchronously. This is generally okay for one-time init.
-        asyncio.run(init_db())
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS market_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    data_type TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(data_type, timestamp) ON CONFLICT REPLACE
+                )
+            """)
+            await db.commit()
+        logging.info(f"Database initialized at {self.db_path}")
 
     async def set(self, data_type: str, data: MarketData, ttl_hours: int = 24):
         """
@@ -571,6 +564,9 @@ async def main():
         return False # Exit if Google Sheets manager cannot be initialized
 
     cache = DataCache(Config.Files.CACHE_DB)
+    # IMPORTANT: Await the database initialization now that it's an async method
+    await cache.initialize_db() 
+    
     updater = DataUpdater(cache, gs_manager)
     
     # Ensure local data directory exists for NAV history and cache DB
