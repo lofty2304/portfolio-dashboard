@@ -1,4 +1,3 @@
-
 name: Deploy React App to GitHub Pages
 
 on:
@@ -9,6 +8,8 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # <--- This line grants write access to the GITHUB_TOKEN
 
     steps:
       - name: Checkout repository
@@ -20,7 +21,6 @@ jobs:
           node-version: '20' # Use a stable Node.js version
 
       - name: Install dependencies
-        # Changed from 'npm ci' to 'npm install' to ensure package-lock.json is generated if missing
         run: npm install
 
       - name: Build React app
