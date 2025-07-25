@@ -1,0 +1,45 @@
+# Use a lightweight Python base image
+FROM python:3.10-slim-buster
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Copy requirements.txt and install dependencies
+# Use --no-cache-dir to save space
+# Handle ta-lib installation specifically
+COPY requirements.txt .
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+# Install ta-lib C library (adjust for your OS/distribution if not Debian-based)
+# For Debian/Ubuntu:
+RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
+    tar -xzf ta-lib-0.4.0-src.tar.gz && \
+    cd ta-lib && \
+    ./configure --prefix=/usr && \
+    make && \
+    make install && \
+    cd .. && \
+    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
+
+# Now install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of your application code
+COPY . .
+
+# Ensure data directory exists and copy initial data
+RUN mkdir -p src/data
+# You might need to copy your initial .xlsx and .csv files here
+# For example:
+# COPY Fund-Tracker-original.xlsx src/data/
+# COPY src/data/nifty.csv src/data/
+# COPY src/data/gold.csv src/data/
+# ... (copy all necessary initial data files)
+
+# Expose the port Streamlit runs on
+EXPOSE 8501
+
+# Command to run the Streamlit application
+CMD ["streamlit", "run", "portfolio_dashboard.py", "--server.port=8501", "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
