@@ -1,2 +1,8 @@
 src/data/cache.db
 src/data/nav_history.csv
+src/data/gold.csv
+src/data/nifty.csv
+src/data/currency.csv
+# You might also want to add a generic rule for all backup files if they are generated
+src/data/*_backup.csv
+src/data/*_backup_*.csv
