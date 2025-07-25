@@ -287,7 +287,7 @@ class DataUpdater:
                         continue # Try next URL if writing fails
 
             except Exception as e:
-                logging.error(f"Gold update failed for {url}: {str(e)}")
+                logging.error(f"Gold update failed for {str(e)}")
                 continue
 
         logging.error("All Gold update sources failed.")
