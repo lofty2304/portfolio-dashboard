@@ -36,8 +36,8 @@ class Config:
     RATE_LIMIT: int = 2
 
     class Files:
-        # Now we can correctly reference Config.DATA_DIR
-        NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv" # Fixed reference
+        # Now we can correctly reference Config.DATA_DIR without asterisks
+        NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv" # Fixed: Removed asterisks
         FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx" # If still used locally
         FUND_SHEET: str = "Fund Tracker"
         CACHE_DB: str = f"{Config.DATA_DIR}/cache.db"
