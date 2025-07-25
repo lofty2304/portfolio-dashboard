@@ -28,21 +28,25 @@ logging.basicConfig(
 )
 
 # === Config Class with Fixed Structure ===
-# === Config ===
 class Config:
+    """
+    Centralized configuration class for the portfolio updater.
+    Uses nested classes for better organization of related constants.
+    """
     pass
 
 # Top-level config constants
 Config.DATA_DIR: str = "src/data"
 Config.RETRY_ATTEMPTS: int = 3
 Config.REQUEST_TIMEOUT: int = 10
-Config.RATE_LIMIT: int = 2
+Config.RATE_LIMIT: int = 2 # Calls per period (e.g., 2 calls per 2 seconds)
 
 # Nested Files class safely referencing Config
 class Files:
+    """File paths and Google Sheet IDs."""
     NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv"
-    FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx"
-    FUND_SHEET: str = "Fund Tracker"
+    FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx" # Not directly used in this script's logic
+    FUND_SHEET: str = "Fund Tracker" # Not directly used in this script's logic
     CACHE_DB: str = f"{Config.DATA_DIR}/cache.db"
 
     # Sheet IDs pulled from environment variables
@@ -50,8 +54,12 @@ class Files:
     GOLD_SHEET_ID: str = os.getenv("GOOGLE_SHEET_GOLD_ID", "YOUR_GOLD_SHEET_ID")
     CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
 
-# Nested URLs class
+# Nested URLs class - This class definition should be at the top-level indentation.
+# This ensures it's not accidentally nested inside another class or function,
+# which was likely the cause of the "IndentationError: unexpected indent" at line 72
+# in your workflow's `nav_update_scheduler.py` file.
 class URLs:
+    """URLs for data fetching."""
     INVESTING_BASE: str = "https://www.investing.com"
     GOLD_URLS: List[str] = [
         "https://www.goodreturns.in/gold-rates/",
@@ -69,28 +77,16 @@ class URLs:
 Config.Files = Files
 Config.URLs = URLs
 
-    class URLs:
-        INVESTING_BASE: str = "https://www.investing.com"
-        GOLD_URLS: List[str] = [
-            "https://www.goodreturns.in/gold-rates/",
-            "https://www.livemint.com/money/personal-finance/gold-rate-in-india",
-            "https://www.mcxindia.com/market-data/spot-market-price"
-        ]
-        CURRENCY_ENDPOINTS: Dict[str, str] = {
-            "USDINR": "/currencies/usd-inr",
-            "EURINR": "/currencies/eur-inr",
-            "BTCINR": "https://www.coindesk.com/price/bitcoin/"
-        }
-        AMFI_NAV: str = "https://www.amfiindia.com/spages/NAVAll.txt"
-
 @dataclass
 class MarketData:
+    """Dataclass to standardize market data."""
     timestamp: datetime
     value: float
     source: str
     metadata: Dict[str, Any] = None
 
     def to_dict(self) -> dict:
+        """Converts the MarketData object to a dictionary for JSON serialization."""
         return {
             "timestamp": self.timestamp.isoformat(),
             "value": self.value,
@@ -99,35 +95,55 @@ class MarketData:
         }
 
 class DataCache:
+    """
+    Manages a local SQLite cache for market data.
+    Stores and retrieves MarketData objects.
+    """
     def __init__(self, db_path: str):
         self.db_path = db_path
+        # Setup DB synchronously during initialization.
+        # For a truly non-blocking setup, this could be an async method called externally.
         self.setup_db()
 
     def setup_db(self):
+        """Initializes the SQLite database table if it doesn't exist."""
         async def init_db():
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS market_data (
-                        id INTEGER PRIMARY KEY,
-                        data_type TEXT,
-                        timestamp TEXT,
-                        data TEXT,
-                        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        data_type TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        data TEXT NOT NULL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(data_type, timestamp) ON CONFLICT REPLACE
                     )
                 """)
                 await db.commit()
         
+        # Run the async setup synchronously. This is generally okay for one-time init.
         asyncio.run(init_db())
 
     async def set(self, data_type: str, data: MarketData, ttl_hours: int = 24):
+        """
+        Stores market data in the cache.
+        Uses UPSERT (REPLACE) to avoid duplicate entries for the same data_type and timestamp.
+        TTL is currently not enforced for cleanup but can be used for future expiration logic.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO market_data (data_type, timestamp, data) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO market_data (data_type, timestamp, data) VALUES (?, ?, ?)",
                 (data_type, data.timestamp.isoformat(), json.dumps(data.to_dict()))
             )
             await db.commit()
+        logging.info(f"Cached data for {data_type} with timestamp {data.timestamp.isoformat()}")
+
 
     async def get(self, data_type: str) -> Optional[MarketData]:
+        """
+        Retrieves the most recent market data for a given type from the cache.
+        Does not enforce TTL during retrieval, only fetches the latest.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
                 "SELECT data FROM market_data WHERE data_type = ? ORDER BY timestamp DESC LIMIT 1",
@@ -136,15 +152,21 @@ class DataCache:
             row = await cursor.fetchone()
             if row:
                 data = json.loads(row[0])
+                logging.info(f"Retrieved cached data for {data_type} from {data['timestamp']}")
                 return MarketData(
                     timestamp=datetime.fromisoformat(data["timestamp"]),
                     value=data["value"],
                     source=data["source"],
                     metadata=data.get("metadata")
                 )
+        logging.debug(f"No cached data found for {data_type}")
         return None
 
 class GoogleSheetsManager:
+    """
+    Manages interactions with Google Sheets using gspread.
+    Handles authorization and common sheet operations.
+    """
     def __init__(self, service_account_info: str):
         # service_account_info is expected to be a JSON string
         try:
@@ -157,10 +179,13 @@ class GoogleSheetsManager:
             logging.info("Google Sheets API client authorized.")
         except Exception as e:
             logging.error(f"Failed to authorize Google Sheets API client: {e}")
-            raise
+            raise # Re-raise to prevent script from continuing without auth
 
     def append_data(self, sheet_id: str, sheet_name: str, data: List[List[Any]]) -> bool:
         """Appends a list of rows to the specified Google Sheet."""
+        if not data:
+            logging.warning(f"No data provided to append to {sheet_name} in sheet {sheet_id}.")
+            return True # Consider it a success if nothing to append
         try:
             spreadsheet = self.client.open_by_key(sheet_id)
             worksheet = spreadsheet.worksheet(sheet_name)
@@ -195,17 +220,24 @@ class GoogleSheetsManager:
 
 # === DataFetcher Class ===
 class DataFetcher:
+    """
+    Handles asynchronous HTTP requests with retry and rate limiting.
+    Uses aiohttp for efficient network operations.
+    """
     def __init__(self, cache: DataCache):
         self.cache = cache
         self.session = None # Will be initialized in async context manager
 
     async def __aenter__(self):
+        """Initializes the aiohttp ClientSession."""
         self.session = aiohttp.ClientSession()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Closes the aiohttp ClientSession."""
         if self.session:
             await self.session.close()
+            logging.info("aiohttp ClientSession closed.")
 
     @backoff.on_exception(backoff.expo,
                           aiohttp.ClientError,
@@ -213,10 +245,13 @@ class DataFetcher:
                           factor=Config.RATE_LIMIT)
     @ratelimit.limits(calls=1, period=Config.RATE_LIMIT)
     async def fetch_url(self, url: str) -> Optional[str]:
+        """
+        Fetches content from a given URL with retries and rate limiting.
+        """
         logging.info(f"Attempting to fetch URL: {url}")
         try:
             async with self.session.get(url, timeout=Config.REQUEST_TIMEOUT) as response:
-                response.raise_for_status()  # Raise an exception for bad status codes
+                response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
                 text = await response.text()
                 logging.info(f"Successfully fetched URL: {url}")
                 return text
@@ -231,6 +266,10 @@ class DataFetcher:
             return None
 
 class DataUpdater:
+    """
+    Orchestrates the fetching, parsing, and updating of market data
+    to Google Sheets and local files.
+    """
     def __init__(self, cache: DataCache, gs_manager: GoogleSheetsManager):
         self.cache = cache
         self.gs_manager = gs_manager
@@ -238,30 +277,33 @@ class DataUpdater:
 
     @staticmethod
     def ensure_directories():
+        """Ensures that the necessary data directories exist."""
         os.makedirs(Config.DATA_DIR, exist_ok=True)
+        logging.info(f"Ensured data directory exists: {Config.DATA_DIR}")
 
     def _safe_merge_csv(self, filepath: str, new_df: pd.DataFrame, 
-                        key_cols: List[str], date_fmt: Optional[str] = None) -> None:
+                         key_cols: List[str], date_fmt: Optional[str] = None) -> None:
         """
         Merges new DataFrame with existing CSV, drops duplicates, and sorts.
         This is still used for NAV history if kept locally.
         """
         try:
             if os.path.exists(filepath):
-                # Optional: backup old file before merging
-                # backup_path = filepath.replace('.csv', f'_backup_{datetime.now():%Y%m%d_%H%M%S}.csv')
-                # shutil.copy2(filepath, backup_path)
-
                 try:
                     existing_df = pd.read_csv(filepath)
-                except FileNotFoundError: # Should not happen if os.path.exists is true
-                    existing_df = pd.DataFrame() # Start with empty if file somehow disappeared
+                except pd.errors.EmptyDataError:
+                    logging.warning(f"CSV file {filepath} is empty. Starting with an empty DataFrame.")
+                    existing_df = pd.DataFrame()
+                except Exception as e:
+                    logging.error(f"Error reading existing CSV {filepath}: {e}. Starting with empty DataFrame.")
+                    existing_df = pd.DataFrame() # Start with empty if file somehow corrupted/unreadable
 
                 combined = pd.concat([existing_df, new_df])
                 combined = combined.drop_duplicates(subset=key_cols, keep='last')
 
                 if date_fmt:
                     # Convert to datetime, handle errors, then sort
+                    # Use a temporary column for sorting to avoid modifying the original date column type
                     combined['_sort_date'] = pd.to_datetime(combined[key_cols[0]], format=date_fmt, errors='coerce')
                     combined = combined.dropna(subset=['_sort_date']) # Drop rows where date conversion failed
                     combined = combined.sort_values('_sort_date').drop(columns=['_sort_date'])
@@ -277,6 +319,7 @@ class DataUpdater:
             raise
 
     async def update_nifty(self, fetcher: DataFetcher) -> bool:
+        """Fetches Nifty data and appends it to the Google Sheet."""
         logging.info("Starting Nifty update for Google Sheet...")
         try:
             html = await fetcher.fetch_url(f"{Config.URLs.INVESTING_BASE}/indices/s-p-cnx-nifty")
@@ -284,9 +327,10 @@ class DataUpdater:
                 logging.warning("No HTML fetched for Nifty.")
                 return False
 
+            # Regex to find the last price. This selector might be brittle.
             match = re.search(r'last\">(\d{4,5}\.\d+)', html)
             if not match:
-                logging.warning("Could not parse Nifty price from HTML.")
+                logging.warning("Could not parse Nifty price from HTML. Selector might have changed.")
                 return False
 
             price = float(match.group(1))
@@ -295,10 +339,13 @@ class DataUpdater:
             # Append to Google Sheet
             # Ensure your Google Sheet has columns like "Date", "Close"
             data_row = [today_str, price]
-            success = self.gs_manager.append_data(Config.Files.NIFTY_SHEET_ID, "Sheet1", [data_row]) # Assuming "Sheet1"
+            # Assuming "Sheet1" is the target sheet name. Consider making this configurable.
+            success = self.gs_manager.append_data(Config.Files.NIFTY_SHEET_ID, "Sheet1", [data_row])
             
             if success:
                 logging.info(f"Updated Nifty price: {price} to Google Sheet.")
+                # Cache the Nifty data
+                await self.cache.set("Nifty", MarketData(datetime.now(), price, "Investing.com"))
             else:
                 logging.error(f"Failed to write Nifty price {price} to Google Sheet.")
             return success
@@ -308,51 +355,73 @@ class DataUpdater:
             return False
 
     async def update_gold(self, fetcher: DataFetcher) -> bool:
+        """Fetches Gold data from multiple sources and appends to Google Sheet."""
         logging.info("Starting Gold update for Google Sheet...")
         for url in Config.URLs.GOLD_URLS:
             try:
                 html = await fetcher.fetch_url(url)
                 if not html:
                     logging.warning(f"No HTML fetched for Gold from {url}.")
-                    continue
+                    continue # Try next URL
 
                 price = None
+                source_name = url.split("//")[1].split("/")[0] # Extract domain for source
+
                 if "goodreturns.in" in url:
                     soup = BeautifulSoup(html, "html.parser")
+                    # This selector targets the 22 carat gold price per 10 grams
                     tag = soup.find("td", string=re.compile("22 carat", re.IGNORECASE))
                     if tag:
                         price_td = tag.find_next_sibling("td")
                         if price_td and price_td.text:
-                            price = float(price_td.text.strip().replace("₹", "").replace(",", "")) * 10
-                # Add more parsing logic for other gold URLs if needed
-                # elif "livemint.com" in url:
-                #     ...
-                # elif "mcxindia.com" in url:
-                #     ...
+                            # goodreturns often shows price per 1 gram, multiply by 10 for 10 grams
+                            price = float(price_td.text.strip().replace("₹", "").replace(",", "")) * 10 
+                            logging.info(f"Parsed Gold price from goodreturns.in: {price}")
+                elif "livemint.com" in url:
+                    soup = BeautifulSoup(html, "html.parser")
+                    # Example selector for Livemint, needs verification
+                    # Look for a tag that typically holds the gold price, e.g., a span with a specific class
+                    # price_tag = soup.find('span', class_='price-value') 
+                    # if price_tag:
+                    #     price = float(price_tag.text.strip().replace("₹", "").replace(",", ""))
+                    logging.warning(f"Parsing logic for livemint.com not implemented. Skipping {url}")
+                    continue
+                elif "mcxindia.com" in url:
+                    soup = BeautifulSoup(html, "html.parser")
+                    # Example selector for MCX India, needs verification
+                    # price_tag = soup.find('div', class_='spot-price')
+                    # if price_tag:
+                    #     price = float(price_tag.text.strip().replace(",", ""))
+                    logging.warning(f"Parsing logic for mcxindia.com not implemented. Skipping {url}")
+                    continue
 
                 if price:
                     today_str = datetime.now().strftime("%Y-%m-%d")
 
                     # Append to Google Sheet
                     # Ensure your Google Sheet has columns like "Date", "Price", "Source"
-                    data_row = [today_str, price, url]
-                    success = self.gs_manager.append_data(Config.Files.GOLD_SHEET_ID, "Sheet1", [data_row]) # Assuming "Sheet1"
+                    data_row = [today_str, price, source_name]
+                    # Assuming "Sheet1" is the target sheet name. Consider making this configurable.
+                    success = self.gs_manager.append_data(Config.Files.GOLD_SHEET_ID, "Sheet1", [data_row])
                     
                     if success:
                         logging.info(f"Updated Gold price: ₹{price} from {url} to Google Sheet.")
+                        # Cache the Gold data
+                        await self.cache.set("Gold", MarketData(datetime.now(), price, source_name))
                         return True # Return True as soon as one source succeeds
                     else:
                         logging.error(f"Failed to write Gold price {price} from {url} to Google Sheet.")
                         continue # Try next URL if writing fails
 
             except Exception as e:
-                logging.error(f"Gold update failed for {str(e)}")
-                continue
+                logging.error(f"Gold update failed for {url}: {str(e)}")
+                continue # Try next URL
 
-        logging.error("All Gold update sources failed.")
+        logging.error("All Gold update sources failed or parsing logic not implemented for all.")
         return False
 
     async def update_currency(self, fetcher: DataFetcher) -> bool:
+        """Fetches currency data for multiple pairs and appends to Google Sheet."""
         logging.info("Starting currency update for Google Sheet...")
         success_count = 0
         all_currency_data_rows = []
@@ -366,34 +435,43 @@ class DataUpdater:
                     continue
 
                 price = None
+                source_name = url.split("//")[1].split("/")[0] if url.startswith("http") else "Investing.com"
+
                 if "investing.com" in url:
                     soup = BeautifulSoup(html, "html.parser")
-                    price_tag = soup.find('div', class_='instrument-price-last') # This selector needs verification
+                    # This selector needs verification as website structures change
+                    price_tag = soup.find('div', class_='instrument-price-last') 
                     if price_tag:
                         price = float(price_tag.text.strip().replace(',', ''))
+                        logging.info(f"Parsed {currency_pair} price from investing.com: {price}")
                 elif "coindesk.com" in url:
                     soup = BeautifulSoup(html, "html.parser")
-                    price_tag = soup.find('span', class_='currency-price') # This selector needs verification
+                    # This selector needs verification as website structures change
+                    price_tag = soup.find('span', class_='currency-price') 
                     if price_tag:
                         price = float(price_tag.text.strip().replace('₹', '').replace(',', ''))
+                        logging.info(f"Parsed {currency_pair} price from coindesk.com: {price}")
 
                 if price:
                     today_str = datetime.now().strftime("%Y-%m-%d")
                     # Prepare row for Google Sheet
                     # Ensure your Google Sheet has columns like "Date", "CurrencyPair", "Rate", "Source"
-                    all_currency_data_rows.append([today_str, currency_pair, price, url])
+                    all_currency_data_rows.append([today_str, currency_pair, price, source_name])
                     logging.info(f"Prepared {currency_pair} rate: {price} from {url} for Google Sheet.")
                     success_count += 1
+                    # Cache the currency data
+                    await self.cache.set(f"Currency_{currency_pair}", MarketData(datetime.now(), price, source_name))
                 else:
-                    logging.warning(f"Could not parse price for {currency_pair} from {url}")
+                    logging.warning(f"Could not parse price for {currency_pair} from {url}. Selector might have changed.")
 
             except Exception as e:
                 logging.error(f"Currency update failed for {currency_pair} from {url}: {str(e)}")
-                continue
+                continue # Continue to next currency pair even if one fails
         
         if all_currency_data_rows:
             # Append all collected currency data in one go
-            success = self.gs_manager.append_data(Config.Files.CURRENCY_SHEET_ID, "Sheet1", all_currency_data_rows) # Assuming "Sheet1"
+            # Assuming "Sheet1" is the target sheet name. Consider making this configurable.
+            success = self.gs_manager.append_data(Config.Files.CURRENCY_SHEET_ID, "Sheet1", all_currency_data_rows)
             if success:
                 logging.info(f"Successfully appended {success_count} currency rates to Google Sheet.")
                 return True
@@ -405,14 +483,19 @@ class DataUpdater:
             return False
 
     async def update_nav(self, fetcher: DataFetcher) -> bool:
+        """
+        Fetches Mutual Fund NAV data from AMFI and merges it into a local CSV.
+        Consider migrating this to Google Sheets for consistency if desired.
+        """
         logging.info("Starting NAV update...")
         try:
             nav_data_raw = await fetcher.fetch_url(Config.URLs.AMFI_NAV)
             if not nav_data_raw:
+                logging.error("Failed to fetch raw NAV data from AMFI.")
                 return False
 
             # Parse AMFI NAV data
-            # This is a simplified parser, actual AMFI data needs robust parsing
+            # AMFI provides a semi-colon separated text file.
             nav_lines = nav_data_raw.strip().split('\n')
             
             # Find the header line (usually starts with "Scheme Code")
@@ -423,7 +506,7 @@ class DataUpdater:
                     break
             
             if header_line_index == -1:
-                logging.error("Could not find header in AMFI NAV data.")
+                logging.error("Could not find header in AMFI NAV data. AMFI file format might have changed.")
                 return False
 
             # Extract header and data lines
@@ -436,6 +519,8 @@ class DataUpdater:
                 if len(parts) == len(header): # Basic check for complete rows
                     record = dict(zip(header, parts))
                     records.append(record)
+                else:
+                    logging.debug(f"Skipping malformed NAV line: {line}")
             
             if not records:
                 logging.warning("No NAV records parsed from AMFI data.")
@@ -453,12 +538,13 @@ class DataUpdater:
 
             # Convert NAV to numeric, handle errors
             df_nav['NAV'] = pd.to_numeric(df_nav['NAV'], errors='coerce')
-            df_nav = df_nav.dropna(subset=['NAV'])
+            df_nav = df_nav.dropna(subset=['NAV']) # Drop rows where NAV could not be converted
 
             # Convert Date to datetime object for merging
+            # AMFI date format is typically 'DD-Mon-YYYY' (e.g., '25-Jul-2025')
             df_nav['Date'] = pd.to_datetime(df_nav['Date'], format='%d-%b-%Y', errors='coerce')
-            df_nav = df_nav.dropna(subset=['Date'])
-            df_nav['Date'] = df_nav['Date'].dt.strftime('%Y-%m-%d') # Standardize date format
+            df_nav = df_nav.dropna(subset=['Date']) # Drop rows where date conversion failed
+            df_nav['Date'] = df_nav['Date'].dt.strftime('%Y-%m-%d') # Standardize date format for CSV
 
             # Merge with existing NAV history (still to local CSV for now)
             self._safe_merge_csv(Config.Files.NAV_HISTORY_CSV, df_nav, ["Date", "Fund Code"], "%Y-%m-%d")
@@ -471,6 +557,7 @@ class DataUpdater:
             return False
 
 async def main():
+    """Main function to orchestrate the data fetching and updating process."""
     # Retrieve Google Service Account credentials from environment variable
     google_sa_key_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY")
     if not google_sa_key_json:
@@ -481,7 +568,7 @@ async def main():
         gs_manager = GoogleSheetsManager(google_sa_key_json)
     except Exception as e:
         logging.error(f"Failed to initialize GoogleSheetsManager: {e}")
-        return False
+        return False # Exit if Google Sheets manager cannot be initialized
 
     cache = DataCache(Config.Files.CACHE_DB)
     updater = DataUpdater(cache, gs_manager)
@@ -496,16 +583,24 @@ async def main():
             updater.update_currency(fetcher),
             updater.update_nav(fetcher), # NAV history still updates local CSV for now
         ]
+        # Run all update tasks concurrently. return_exceptions=True allows all tasks to complete
+        # even if some fail, and their exceptions are returned as results.
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Check if all tasks completed successfully (returned True, not an exception)
         success = all(isinstance(r, bool) and r for r in results)
         
         if success:
             logging.info("All data updates completed successfully")
         else:
-            logging.error("Some data updates failed")
+            logging.error("Some data updates failed. Check logs for details.")
+            # Log specific failures
+            for i, r in enumerate(results):
+                if not (isinstance(r, bool) and r):
+                    logging.error(f"Task {i} failed: {r}")
         
-        # If NAV_HISTORY_CSV and CACHE_DB are still local, the workflow will handle pushing them.
         return success
 
 if __name__ == "__main__":
+    # Run the main asynchronous function
     asyncio.run(main())
