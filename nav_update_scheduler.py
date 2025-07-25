@@ -28,24 +28,46 @@ logging.basicConfig(
 )
 
 # === Config Class with Fixed Structure ===
+# === Config ===
 class Config:
-    # Base paths and settings (define these first)
-    DATA_DIR: str = "src/data" # This is correctly defined here
-    RETRY_ATTEMPTS: int = 3
-    REQUEST_TIMEOUT: int = 10
-    RATE_LIMIT: int = 2
+    pass
 
-    class Files:
-        # CORRECTED LINE: No asterisks around Config.DATA_DIR
-        NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv" 
-        FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx" # If still used locally
-        FUND_SHEET: str = "Fund Tracker"
-        CACHE_DB: str = f"{Config.DATA_DIR}/cache.db"
+# Top-level config constants
+Config.DATA_DIR: str = "src/data"
+Config.RETRY_ATTEMPTS: int = 3
+Config.REQUEST_TIMEOUT: int = 10
+Config.RATE_LIMIT: int = 2
 
-        # Google Sheet IDs - REPLACE WITH YOUR ACTUAL GOOGLE SHEET IDs
-        NIFTY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NIFTY_ID", "YOUR_NIFTY_SHEET_ID")
-        GOLD_SHEET_ID: str = os.getenv("GOOGLE_SHEET_GOLD_ID", "YOUR_GOLD_SHEET_ID")
-        CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
+# Nested Files class safely referencing Config
+class Files:
+    NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv"
+    FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx"
+    FUND_SHEET: str = "Fund Tracker"
+    CACHE_DB: str = f"{Config.DATA_DIR}/cache.db"
+
+    # Sheet IDs pulled from environment variables
+    NIFTY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NIFTY_ID", "YOUR_NIFTY_SHEET_ID")
+    GOLD_SHEET_ID: str = os.getenv("GOOGLE_SHEET_GOLD_ID", "YOUR_GOLD_SHEET_ID")
+    CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
+
+# Nested URLs class
+class URLs:
+    INVESTING_BASE: str = "https://www.investing.com"
+    GOLD_URLS: List[str] = [
+        "https://www.goodreturns.in/gold-rates/",
+        "https://www.livemint.com/money/personal-finance/gold-rate-in-india",
+        "https://www.mcxindia.com/market-data/spot-market-price"
+    ]
+    CURRENCY_ENDPOINTS: Dict[str, str] = {
+        "USDINR": "/currencies/usd-inr",
+        "EURINR": "/currencies/eur-inr",
+        "BTCINR": "https://www.coindesk.com/price/bitcoin/"
+    }
+    AMFI_NAV: str = "https://www.amfiindia.com/spages/NAVAll.txt"
+
+# Attach nested classes to Config
+Config.Files = Files
+Config.URLs = URLs
 
     class URLs:
         INVESTING_BASE: str = "https://www.investing.com"
