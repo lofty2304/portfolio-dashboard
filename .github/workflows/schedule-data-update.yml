@@ -1,59 +1,65 @@
 name: Scheduled Data Update (Backend)
 
 on:
-  # Schedule the workflow to run daily at 6:30 PM IST (which is 1:00 PM UTC)
-  # Adjust the cron schedule as needed for your desired frequency and timezone
   schedule:
-    - cron: '0 13 * * *' # Runs daily at 13:00 UTC (1:00 PM UTC)
-
-  # Allows you to run this workflow manually from the Actions tab in GitHub
+    - cron: '0 13 * * *' # Runs daily at 13:00 UTC (6:30 PM IST)
   workflow_dispatch:
 
 jobs:
   run-scheduler:
     runs-on: ubuntu-latest
     permissions:
-      contents: read # Read access is usually sufficient if the scheduler pushes data itself
-      # If the scheduler needs to push data back to the repo, you'll need 'contents: write'
+      contents: write # REQUIRED to push updated data (NAV history, cache DB) back to the repository
       # packages: write # Required if you're pushing the Docker image to GHCR in this workflow
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for proper git operations
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Optional: Log in to GitHub Container Registry if you're pulling the image from there
-      # - name: Log in to GitHub Container Registry
-      #   uses: docker/login-action@v3
-      #   with:
-      #     registry: ghcr.io
-      #     username: ${{ github.actor }}
-      #     password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build Scheduler Docker Image
-        # Build the image directly in this workflow to ensure it's up-to-date
-        # If you have a separate workflow that pushes the image to GHCR, you can
-        # replace this step with a 'docker pull'
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile.scheduler # Path to your scheduler Dockerfile
-          push: false # We only need to build it to run it locally in the runner
-          tags: portfolio-dashboard-scheduler:latest # Local tag for the image
+          file: ./Dockerfile.scheduler
+          push: false
+          tags: portfolio-dashboard-scheduler:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Run Data Update Scheduler
-        # Run the Docker container
         run: |
           docker run \
             -e EXCHANGE_RATE_API_KEY=${{ secrets.EXCHANGE_RATE_API_KEY }} \
-            # Add any other environment variables your scheduler needs
-            # -e YOUR_OTHER_SECRET=${{ secrets.YOUR_OTHER_SECRET }} \
+            -e GOOGLE_SERVICE_ACCOUNT_KEY='${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}' \ # Pass SA key as JSON string
+            -v ${{ github.workspace }}/src/data:/app/src/data \ # Mount data directory for local CSVs/DB
             portfolio-dashboard-scheduler:latest
         env:
-          # Ensure all necessary environment variables are passed to the container
           EXCHANGE_RATE_API_KEY: ${{ secrets.EXCHANGE_RATE_API_KEY }}
-          # ... (add other env vars here)
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }} # Also pass to env for clarity
+
+      - name: Commit and Push Remaining Updated Data to 'data' branch
+        # This step now only handles NAV history and cache DB
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B data # Create and switch to 'data' branch
+          
+          # Add only the files that are still updated locally by the scheduler
+          git add src/data/nav_history.csv
+          git add src/data/*.db # Add the SQLite cache DB
+          
+          # Check if there are any changes to commit for these specific files
+          if git diff --staged --quiet; then
+            echo "No changes to commit for local data files. Skipping commit."
+          else
+            git commit -m "Automated local data update: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            git push origin data # Push to the 'data' branch
+            echo "Successfully pushed updated local data to 'data' branch."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
