@@ -30,20 +30,19 @@ logging.basicConfig(
 # === Config Class with Fixed Structure ===
 class Config:
     # Base paths and settings (define these first)
-    DATA_DIR: str = "src/data" # Still used for NAV history and cache DB
+    DATA_DIR: str = "src/data" # This is correctly defined here
     RETRY_ATTEMPTS: int = 3
     REQUEST_TIMEOUT: int = 10
     RATE_LIMIT: int = 2
 
     class Files:
-        # Local files (NAV history and cache DB might still be local or pushed to GitHub)
-        NAV_HISTORY_CSV: str = f"{DATA_DIR}/nav_history.csv"
+        # Now we can correctly reference Config.DATA_DIR
+        NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv" # Fixed reference
         FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx" # If still used locally
         FUND_SHEET: str = "Fund Tracker"
-        CACHE_DB: str = f"{DATA_DIR}/cache.db"
+        CACHE_DB: str = f"{Config.DATA_DIR}/cache.db"
 
         # Google Sheet IDs - REPLACE WITH YOUR ACTUAL GOOGLE SHEET IDs
-        # Create separate Google Sheets for Nifty, Gold, Currency, and share them with the Service Account email.
         NIFTY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NIFTY_ID", "YOUR_NIFTY_SHEET_ID")
         GOLD_SHEET_ID: str = os.getenv("GOOGLE_SHEET_GOLD_ID", "YOUR_GOLD_SHEET_ID")
         CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
