@@ -412,6 +412,36 @@ class DataUpdater:
         except Exception as e:
             logging.error(f"NAV update failed: {str(e)}")
             return False
+class DataFetcher:
+    def __init__(self, cache: DataCache):
+        self.cache = cache
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+
+    @backoff.on_exception(backoff.expo, aiohttp.ClientError, max_tries=Config.RETRY_ATTEMPTS)
+    @ratelimit.limits(calls=Config.RATE_LIMIT, period=1)
+    async def fetch_url(self, url: str) -> Optional[str]:
+        try:
+            if not self.session:
+                self.session = aiohttp.ClientSession()
+
+            async with self.session.get(url, timeout=Config.REQUEST_TIMEOUT) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    logging.info(f"Fetched data from {url}")
+                    return html
+                else:
+                    logging.warning(f"Failed to fetch {url}, status {response.status}")
+        except Exception as e:
+            logging.error(f"Exception during fetch from {url}: {e}")
+        return None
 
 async def main():
     # Retrieve Google Service Account credentials from environment variable
