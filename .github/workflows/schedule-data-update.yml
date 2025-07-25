@@ -30,7 +30,7 @@ jobs:
           tags: portfolio-dashboard-scheduler:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          load: true # <--- ADD THIS LINE: Ensures the built image is loaded into the Docker daemon
+          load: true # Ensures the built image is loaded into the Docker daemon
 
       - name: Run Data Update Scheduler
         run: |
@@ -40,6 +40,7 @@ jobs:
             -e GOOGLE_SHEET_NIFTY_ID=${{ secrets.GOOGLE_SHEET_NIFTY_ID }} \
             -e GOOGLE_SHEET_GOLD_ID=${{ secrets.GOOGLE_SHEET_GOLD_ID }} \
             -e GOOGLE_SHEET_CURRENCY_ID=${{ secrets.GOOGLE_SHEET_CURRENCY_ID }} \
+            -e GOOGLE_SHEET_NAV_ID=${{ secrets.GOOGLE_SHEET_NAV_ID }} \ # NEW: Pass NAV Sheet ID
             -v ${{ github.workspace }}/src/data:/app/src/data \
             portfolio-dashboard-scheduler:latest
         env:
@@ -48,14 +49,17 @@ jobs:
           GOOGLE_SHEET_NIFTY_ID: ${{ secrets.GOOGLE_SHEET_NIFTY_ID }}
           GOOGLE_SHEET_GOLD_ID: ${{ secrets.GOOGLE_SHEET_GOLD_ID }}
           GOOGLE_SHEET_CURRENCY_ID: ${{ secrets.GOOGLE_SHEET_CURRENCY_ID }}
+          GOOGLE_SHEET_NAV_ID: ${{ secrets.GOOGLE_SHEET_NAV_ID }} # NEW: Add to env for consistency
 
       - name: Commit and Push Remaining Updated Data to 'data' branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -B data
-          git add src/data/nav_history.csv
-          git add src/data/*.db
+          # Removed: git add src/data/nav_history.csv (as it's now pushed to Google Sheets)
+          # Removed: git add src/data/*.db (as cache.db is ignored and other .db files are not expected)
+          # If you have other specific local data files you *do* want to commit, add them here explicitly.
+          # For now, assuming no other local data files need to be committed.
           
           if git diff --staged --quiet; then
             echo "No changes to commit for local data files. Skipping commit."
