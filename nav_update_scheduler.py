@@ -10,7 +10,7 @@ import re
 import shutil
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
-from apscheduler.schedulers.blocking import BlockingScheduler
+# from apscheduler.schedulers.blocking import BlockingScheduler # Removed for GitHub Actions
 import backoff
 import ratelimit
 import aiosqlite
@@ -28,8 +28,8 @@ logging.basicConfig(
 class Config:
     # Base paths and settings (define these first)
     DATA_DIR: str = "src/data"
-    SCHEDULE_HOUR: int = 18  # 6 PM IST
-    SCHEDULE_MINUTE: int = 30
+    # SCHEDULE_HOUR: int = 18  # 6 PM IST - No longer needed for single-run job
+    # SCHEDULE_MINUTE: int = 30 # No longer needed for single-run job
     RETRY_ATTEMPTS: int = 3
     REQUEST_TIMEOUT: int = 10
     RATE_LIMIT: int = 2
@@ -42,6 +42,7 @@ class Config:
         NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv"
         FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx"
         FUND_SHEET: str = "Fund Tracker"
+        CACHE_DB: str = f"{Config.DATA_DIR}/cache.db" # Added cache DB path
 
     class URLs:
         INVESTING_BASE: str = "https://www.investing.com"
@@ -155,7 +156,7 @@ class DataUpdater:
         os.makedirs(Config.DATA_DIR, exist_ok=True)
 
     def _safe_merge_csv(self, filepath: str, new_df: pd.DataFrame, 
-                       key_cols: List[str], date_fmt: Optional[str] = None) -> None:
+                        key_cols: List[str], date_fmt: Optional[str] = None) -> None:
         try:
             if os.path.exists(filepath):
                 backup_path = filepath.replace('.csv', f'_backup_{datetime.now():%Y%m%d_%H%M%S}.csv')
@@ -247,7 +248,121 @@ class DataUpdater:
 
         return False
 
-    # ... Similar implementations for update_currency and update_nav ...
+    # Placeholder for other update functions (update_currency, update_nav)
+    # You will need to implement these similarly, handling their specific scraping logic.
+    async def update_currency(self, fetcher: DataFetcher) -> bool:
+        logging.info("Starting currency update...")
+        success_count = 0
+        for currency_pair, endpoint in Config.URLs.CURRENCY_ENDPOINTS.items():
+            url = f"{Config.URLs.INVESTING_BASE}{endpoint}" if not endpoint.startswith("http") else endpoint
+            try:
+                html = await fetcher.fetch_url(url)
+                if not html:
+                    logging.warning(f"No HTML fetched for {currency_pair} from {url}")
+                    continue
+
+                price = None
+                if "investing.com" in url:
+                    soup = BeautifulSoup(html, "html.parser")
+                    # Example selector for Investing.com prices, needs verification
+                    price_tag = soup.find('div', class_='instrument-price-last')
+                    if price_tag:
+                        price = float(price_tag.text.strip().replace(',', ''))
+                elif "coindesk.com" in url:
+                    soup = BeautifulSoup(html, "html.parser")
+                    price_tag = soup.find('span', class_='currency-price')
+                    if price_tag:
+                        price = float(price_tag.text.strip().replace('₹', '').replace(',', ''))
+
+                if price:
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    data = MarketData(
+                        timestamp=datetime.now(),
+                        value=price,
+                        source=url,
+                        metadata={"currency_pair": currency_pair}
+                    )
+                    await self.cache.set(f"currency_{currency_pair}", data)
+                    
+                    # Assuming a simple CSV structure for currency data
+                    df = pd.DataFrame([{"Date": today, "CurrencyPair": currency_pair, "Rate": price}])
+                    self._safe_merge_csv(Config.Files.CURRENCY_CSV, df, ["Date", "CurrencyPair"], "%Y-%m-%d")
+                    
+                    logging.info(f"Updated {currency_pair} rate: {price} from {url}")
+                    success_count += 1
+                else:
+                    logging.warning(f"Could not parse price for {currency_pair} from {url}")
+
+            except Exception as e:
+                logging.error(f"Currency update failed for {currency_pair} from {url}: {str(e)}")
+                continue
+        return success_count > 0
+
+    async def update_nav(self, fetcher: DataFetcher) -> bool:
+        logging.info("Starting NAV update...")
+        try:
+            nav_data_raw = await fetcher.fetch_url(Config.URLs.AMFI_NAV)
+            if not nav_data_raw:
+                return False
+
+            # Parse AMFI NAV data
+            # This is a simplified parser, actual AMFI data needs robust parsing
+            nav_lines = nav_data_raw.strip().split('\n')
+            
+            # Find the header line (usually starts with "Scheme Code")
+            header_line_index = -1
+            for i, line in enumerate(nav_lines):
+                if "Scheme Code" in line and "Net Asset Value" in line:
+                    header_line_index = i
+                    break
+            
+            if header_line_index == -1:
+                logging.error("Could not find header in AMFI NAV data.")
+                return False
+
+            # Extract header and data lines
+            header = [h.strip() for h in nav_lines[header_line_index].split(';') if h.strip()]
+            data_lines = nav_lines[header_line_index + 1:]
+
+            records = []
+            for line in data_lines:
+                parts = [p.strip() for p in line.split(';') if p.strip()]
+                if len(parts) == len(header): # Basic check for complete rows
+                    record = dict(zip(header, parts))
+                    records.append(record)
+            
+            if not records:
+                logging.warning("No NAV records parsed from AMFI data.")
+                return False
+
+            df_nav = pd.DataFrame(records)
+            
+            # Rename columns for consistency and select relevant ones
+            df_nav = df_nav.rename(columns={
+                'Scheme Code': 'Fund Code',
+                'Scheme Name': 'Fund Name',
+                'Net Asset Value': 'NAV',
+                'Date': 'Date' # AMFI date format is usually DD-Mon-YYYY
+            })
+
+            # Convert NAV to numeric, handle errors
+            df_nav['NAV'] = pd.to_numeric(df_nav['NAV'], errors='coerce')
+            df_nav = df_nav.dropna(subset=['NAV'])
+
+            # Convert Date to datetime object for merging
+            df_nav['Date'] = pd.to_datetime(df_nav['Date'], format='%d-%b-%Y', errors='coerce')
+            df_nav = df_nav.dropna(subset=['Date'])
+            df_nav['Date'] = df_nav['Date'].dt.strftime('%Y-%m-%d') # Standardize date format
+
+            # Merge with existing NAV history
+            self._safe_merge_csv(Config.Files.NAV_HISTORY_CSV, df_nav, ["Date", "Fund Code"], "%Y-%m-%d")
+            
+            logging.info(f"Successfully updated NAV history with {len(df_nav)} records.")
+            return True
+
+        except Exception as e:
+            logging.error(f"NAV update failed: {str(e)}")
+            return False
 
 async def main():
     cache = DataCache(Config.Files.CACHE_DB)
@@ -257,40 +372,46 @@ async def main():
         tasks = [
             updater.update_nifty(fetcher),
             updater.update_gold(fetcher),
-            # Add other update tasks here
+            updater.update_currency(fetcher), # Added currency update
+            updater.update_nav(fetcher),     # Added NAV update
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         success = all(isinstance(r, bool) and r for r in results)
         
         if success:
-            logging.info("All updates completed successfully")
+            logging.info("All data updates completed successfully")
         else:
-            logging.error("Some updates failed")
+            logging.error("Some data updates failed")
         
+        # After all updates, the CSV files in src/data will be updated locally within the container.
+        # The GitHub Actions workflow will then handle pushing these updated files to the repo.
         return success
 
 if __name__ == "__main__":
-    scheduler = BlockingScheduler(timezone="Asia/Kolkata")
+    # This part is removed for GitHub Actions single-run execution
+    # scheduler = BlockingScheduler(timezone="Asia/Kolkata")
     
-    def scheduled_update():
-        asyncio.run(main())
+    # def scheduled_update():
+    #     asyncio.run(main())
     
-    # Run immediate update
-    scheduled_update()
+    # # Run immediate update
+    # scheduled_update()
     
-    # Schedule daily updates
-    scheduler.add_job(
-        scheduled_update, 
-        'cron', 
-        hour=Config.SCHEDULE_HOUR, 
-        minute=Config.SCHEDULE_MINUTE
-    )
+    # # Schedule daily updates
+    # scheduler.add_job(
+    #     scheduled_update, 
+    #     'cron', 
+    #     hour=Config.SCHEDULE_HOUR, 
+    #     minute=Config.SCHEDULE_MINUTE
+    # )
     
-    print(f"⏰ Scheduler running - Updates will run daily at {Config.SCHEDULE_HOUR:02d}:{Config.SCHEDULE_MINUTE:02d} IST")
-    print("Press Ctrl+C to exit")
+    # print(f"⏰ Scheduler running - Updates will run daily at {Config.SCHEDULE_HOUR:02d}:{Config.SCHEDULE_MINUTE:02d} IST")
+    # print("Press Ctrl+C to exit")
     
-    try:
-        scheduler.start()
-    except (KeyboardInterrupt, SystemExit):
-        print("\n👋 Scheduler stopped")
-        logging.info("Scheduler stopped")
+    # try:
+    #     scheduler.start()
+    # except (KeyboardInterrupt, SystemExit):
+    #     print("\n👋 Scheduler stopped")
+    
+    # For GitHub Actions, simply run the main function and exit
+    asyncio.run(main())
