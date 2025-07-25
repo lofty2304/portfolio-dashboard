@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar, Legend } from 'recharts';
-import { DollarSign, TrendingUp, TrendingDown, RefreshCw, AlertTriangle, CheckCircle, Clock, Calendar, Target, Globe, PieChart as PieChartIcon, BarChart2, Zap, LayoutDashboard } from 'lucide-react';
+import { TrendingUp, TrendingDown, RefreshCw, AlertTriangle, CheckCircle, PieChart as PieChartIcon, BarChart2, Zap, LayoutDashboard } from 'lucide-react'; // Removed unused imports
 
 // Tailwind CSS is assumed to be available in the environment.
 // No explicit import needed for Tailwind classes in React components.
