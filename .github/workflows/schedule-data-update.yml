@@ -35,12 +35,12 @@ jobs:
       - name: Run Data Update Scheduler
         run: |
           docker run \
-            -e EXCHANGE_RATE_API_KEY=${{ secrets.EXCHANGE_RATE_API_KEY }} \
+            -e EXCHANGE_RATE_API_KEY="${{ secrets.EXCHANGE_RATE_API_KEY }}" \
             -e GOOGLE_SERVICE_ACCOUNT_KEY='${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}' \
-            -e GOOGLE_SHEET_NIFTY_ID=${{ secrets.GOOGLE_SHEET_NIFTY_ID }} \
-            -e GOOGLE_SHEET_GOLD_ID=${{ secrets.GOOGLE_SHEET_GOLD_ID }} \
-            -e GOOGLE_SHEET_CURRENCY_ID=${{ secrets.GOOGLE_SHEET_CURRENCY_ID }} \
-            -e GOOGLE_SHEET_NAV_ID=${{ secrets.GOOGLE_SHEET_NAV_ID }} \ # NEW: Pass NAV Sheet ID
+            -e GOOGLE_SHEET_NIFTY_ID="${{ secrets.GOOGLE_SHEET_NIFTY_ID }}" \
+            -e GOOGLE_SHEET_GOLD_ID="${{ secrets.GOOGLE_SHEET_GOLD_ID }}" \
+            -e GOOGLE_SHEET_CURRENCY_ID="${{ secrets.GOOGLE_SHEET_CURRENCY_ID }}" \
+            -e GOOGLE_SHEET_NAV_ID="${{ secrets.GOOGLE_SHEET_NAV_ID }}" \
             -v ${{ github.workspace }}/src/data:/app/src/data \
             portfolio-dashboard-scheduler:latest
         env:
@@ -49,18 +49,22 @@ jobs:
           GOOGLE_SHEET_NIFTY_ID: ${{ secrets.GOOGLE_SHEET_NIFTY_ID }}
           GOOGLE_SHEET_GOLD_ID: ${{ secrets.GOOGLE_SHEET_GOLD_ID }}
           GOOGLE_SHEET_CURRENCY_ID: ${{ secrets.GOOGLE_SHEET_CURRENCY_ID }}
-          GOOGLE_SHEET_NAV_ID: ${{ secrets.GOOGLE_SHEET_NAV_ID }} # NEW: Add to env for consistency
+          GOOGLE_SHEET_NAV_ID: ${{ secrets.GOOGLE_SHEET_NAV_ID }}
 
       - name: Commit and Push Remaining Updated Data to 'data' branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -B data
-          # Removed: git add src/data/nav_history.csv (as it's now pushed to Google Sheets)
-          # Removed: git add src/data/*.db (as cache.db is ignored and other .db files are not expected)
+          # The following lines were removed as they caused errors with ignored files:
+          # git add src/data/nav_history.csv
+          # git add src/data/*.db
           # If you have other specific local data files you *do* want to commit, add them here explicitly.
           # For now, assuming no other local data files need to be committed.
           
+          # This 'if' block will now only check for changes to *tracked* files.
+          # Since we've decided to push NAV to Google Sheets and ignore cache.db,
+          # there might be no local files to commit here anymore, which is fine.
           if git diff --staged --quiet; then
             echo "No changes to commit for local data files. Skipping commit."
           else
