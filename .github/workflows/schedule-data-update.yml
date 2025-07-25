@@ -36,11 +36,17 @@ jobs:
           docker run \
             -e EXCHANGE_RATE_API_KEY=${{ secrets.EXCHANGE_RATE_API_KEY }} \
             -e GOOGLE_SERVICE_ACCOUNT_KEY='${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}' \ # Pass SA key as JSON string
+            -e GOOGLE_SHEET_NIFTY_ID=${{ secrets.GOOGLE_SHEET_NIFTY_ID }} \
+            -e GOOGLE_SHEET_GOLD_ID=${{ secrets.GOOGLE_SHEET_GOLD_ID }} \
+            -e GOOGLE_SHEET_CURRENCY_ID=${{ secrets.GOOGLE_SHEET_CURRENCY_ID }} \
             -v ${{ github.workspace }}/src/data:/app/src/data \ # Mount data directory for local CSVs/DB
             portfolio-dashboard-scheduler:latest
         env:
           EXCHANGE_RATE_API_KEY: ${{ secrets.EXCHANGE_RATE_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }} # Also pass to env for clarity
+          GOOGLE_SHEET_NIFTY_ID: ${{ secrets.GOOGLE_SHEET_NIFTY_ID }}
+          GOOGLE_SHEET_GOLD_ID: ${{ secrets.GOOGLE_SHEET_GOLD_ID }}
+          GOOGLE_SHEET_CURRENCY_ID: ${{ secrets.GOOGLE_SHEET_CURRENCY_ID }}
 
       - name: Commit and Push Remaining Updated Data to 'data' branch
         # This step now only handles NAV history and cache DB
@@ -53,7 +59,7 @@ jobs:
           git add src/data/nav_history.csv
           git add src/data/*.db # Add the SQLite cache DB
           
-          # Check if there are any changes to commit for these specific files
+          # Check if there are any changes to commit
           if git diff --staged --quiet; then
             echo "No changes to commit for local data files. Skipping commit."
           else
