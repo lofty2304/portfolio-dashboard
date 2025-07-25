@@ -44,7 +44,8 @@ Config.RATE_LIMIT: int = 2 # Calls per period (e.g., 2 calls per 2 seconds)
 # Nested Files class safely referencing Config
 class Files:
     """File paths and Google Sheet IDs."""
-    NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv"
+    # NAV_HISTORY_CSV is no longer used for primary storage, but kept for reference if needed
+    NAV_HISTORY_CSV: str = f"{Config.DATA_DIR}/nav_history.csv" 
     FUND_TRACKER_EXCEL: str = "Fund-Tracker-original.xlsx" # Not directly used in this script's logic
     FUND_SHEET: str = "Fund Tracker" # Not directly used in this script's logic
     CACHE_DB: str = f"{Config.DATA_DIR}/cache.db"
@@ -53,6 +54,9 @@ class Files:
     NIFTY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NIFTY_ID", "YOUR_NIFTY_SHEET_ID")
     GOLD_SHEET_ID: str = os.getenv("GOOGLE_SHEET_GOLD_ID", "YOUR_GOLD_SHEET_ID")
     CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
+    # NEW: Google Sheet ID for NAV history
+    NAV_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NAV_ID", "YOUR_NAV_SHEET_ID")
+
 
 # Nested URLs class
 class URLs:
@@ -130,6 +134,8 @@ class DataCache:
             )
             await db.commit()
         logging.info(f"Cached data for {data_type} with timestamp {data.timestamp.isoformat()}")
+        # Trigger cleanup after setting new data
+        # await self.cleanup_old_data(data_type, ttl_hours) # This was commented out by user request
 
 
     async def get(self, data_type: str) -> Optional[MarketData]:
@@ -154,6 +160,22 @@ class DataCache:
                 )
         logging.debug(f"No cached data found for {data_type}")
         return None
+
+    # This method was added for cache cleanup, but the user requested to disregard that step for now.
+    # async def cleanup_old_data(self, data_type: str, ttl_hours: int = 24):
+    #     """
+    #     Removes old data entries from the cache for a specific data_type.
+    #     Data older than ttl_hours will be deleted.
+    #     """
+    #     cutoff_time = datetime.now() - timedelta(hours=ttl_hours)
+    #     async with aiosqlite.connect(self.db_path) as db:
+    #         cursor = await db.execute(
+    #             "DELETE FROM market_data WHERE data_type = ? AND timestamp < ?",
+    #             (data_type, cutoff_time.isoformat())
+    #         )
+    #         await db.commit()
+    #         logging.info(f"Cleaned up {cursor.rowcount} old entries for {data_type} (older than {cutoff_time.isoformat()})")
+
 
 class GoogleSheetsManager:
     """
