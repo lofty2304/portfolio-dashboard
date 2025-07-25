@@ -1,3 +1,4 @@
+
 name: Deploy React App to GitHub Pages
 
 on:
@@ -19,7 +20,8 @@ jobs:
           node-version: '20' # Use a stable Node.js version
 
       - name: Install dependencies
-        run: npm ci # Use npm ci for clean installs in CI environments
+        # Changed from 'npm ci' to 'npm install' to ensure package-lock.json is generated if missing
+        run: npm install
 
       - name: Build React app
         run: npm run build # This runs the 'build' script defined in package.json
