@@ -1,15 +1,16 @@
-# Use the same base image for consistency
-FROM python:3.10-slim-buster
+# Use a more recent and supported Debian base image
+FROM python:3.10-slim-bookworm
 
 WORKDIR /app
 
 COPY requirements.txt .
+# Update apt-get commands for the new Debian release
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
+    wget \ # Added wget as it's used for ta-lib download
     && rm -rf /var/lib/apt/lists/*
-# Install ta-lib C library if nav_update_scheduler.py implicitly uses it (though it doesn't seem to directly)
-# If not, you can remove this section to keep the image smaller.
+# Install ta-lib C library
 RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     tar -xzf ta-lib-0.4.0-src.tar.gz && \
     cd ta-lib && \
@@ -27,6 +28,4 @@ COPY . .
 RUN mkdir -p src/data
 
 # Command to run the scheduler script
-# Note: For production, you'd typically run this via a cloud cron service
-# This CMD is for running it manually or as a one-off job.
 CMD ["python", "nav_update_scheduler.py"]
