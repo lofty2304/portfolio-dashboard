@@ -31,4 +31,10 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./build # The directory containing your built static files
-          publish_branch: gh-pages # The branch where the static content will be published
+          # Set the branch where the static content will be published.
+          # For user/organization pages, it's usually 'master' or 'main'.
+          # For project pages, it's typically 'gh-pages'.
+          publish_branch: gh-pages
+          # Add a dotfile option to ensure all files, including hidden ones, are copied
+          # This specifically addresses the "cp: no such file or directory: .../build/.*" error
+          enable_jekyll: false # Ensure Jekyll processing is disabled for React apps
