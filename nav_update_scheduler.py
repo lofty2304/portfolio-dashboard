@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import backoff
 import ratelimit
 import json
+import aiosqlite # ADDED THIS IMPORT
 
 # For Google Sheets Integration
 import gspread
