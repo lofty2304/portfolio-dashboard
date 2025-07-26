@@ -14,6 +14,7 @@ import backoff
 import ratelimit
 import json
 import aiosqlite
+import sys # ADDED THIS IMPORT
 
 # For Google Sheets Integration
 import gspread
@@ -24,7 +25,8 @@ logging.basicConfig(
     filename='portfolio_updater.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    stream=sys.stdout # ADDED THIS TO DIRECT LOGS TO CONSOLE FOR GITHUB ACTIONS
 )
 
 # === Config Class with Fixed Structure ===
