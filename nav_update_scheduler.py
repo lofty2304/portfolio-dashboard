@@ -14,7 +14,7 @@ import backoff
 import ratelimit
 import json
 import aiosqlite
-import sys # ADDED THIS IMPORT
+import sys 
 
 # For Google Sheets Integration
 import gspread
@@ -22,11 +22,12 @@ from google.oauth2.service_account import Credentials
 
 # === Setup Logging ===
 logging.basicConfig(
-    filename='portfolio_updater.log',
+    # Removed filename='portfolio_updater.log' as it conflicts with 'stream'.
+    # Logs will now be directed to sys.stdout, which GitHub Actions captures.
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
-    stream=sys.stdout # ADDED THIS TO DIRECT LOGS TO CONSOLE FOR GITHUB ACTIONS
+    stream=sys.stdout 
 )
 
 # === Config Class with Fixed Structure ===
