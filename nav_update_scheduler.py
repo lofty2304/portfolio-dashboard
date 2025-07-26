@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import backoff
 import ratelimit
 import json
-import aiosqlite # ADDED THIS IMPORT
+import aiosqlite
 
 # For Google Sheets Integration
 import gspread
@@ -48,6 +48,7 @@ Config.API_KEY_GOLDAPI: str = os.getenv("GOLDAPI_API_KEY", "YOUR_GOLDAPI_API_KEY
 Config.API_KEY_FRED: str = os.getenv("FRED_API_KEY", "YOUR_FRED_API_KEY") # NEW FRED API Key
 Config.API_KEY_TWELVE_DATA: str = os.getenv("TWELVE_DATA_API_KEY", "YOUR_TWELVE_DATA_API_KEY") # NEW Twelve Data API Key
 Config.API_KEY_POLYGON: str = os.getenv("POLYGON_API_KEY", "YOUR_POLYGON_API_KEY") # NEW Polygon.io API Key
+Config.API_KEY_EODHD: str = os.getenv("EODHD_API_KEY", "YOUR_EODHD_API_KEY") # NEW EODHD API Key
 
 
 # Nested Files class safely referencing Config
@@ -71,7 +72,7 @@ class Files:
 # Nested URLs class
 class URLs:
     """URLs for data fetching."""
-    INVESTING_BASE: str = "https://www.investing.com" # Still used for Nifty if FMP/Twelve Data/Polygon fails or for other data
+    INVESTING_BASE: str = "https://www.investing.com" # Still used for Nifty if FMP/Twelve Data/Polygon/EODHD fails or for other data
     
     # NEW API Base URLs
     EXCHANGE_RATE_BASE: str = "https://v6.exchangerate-api.com/v6"
@@ -80,6 +81,7 @@ class URLs:
     FRED_BASE: str = "https://api.stlouisfed.org/fred" # NEW FRED API Base URL
     TWELVE_DATA_BASE: str = "https://api.twelvedata.com" # NEW Twelve Data API Base URL
     POLYGON_BASE: str = "https://api.polygon.io" # NEW Polygon.io API Base URL
+    EODHD_BASE: str = "https://eodhd.com/api" # NEW EODHD API Base URL
 
     # Gold URLs now only for API, web scraping URLs removed
     GOLD_URLS: List[str] = [
@@ -351,7 +353,8 @@ class DataUpdater:
     async def update_nifty(self, fetcher: DataFetcher) -> bool:
         """
         Fetches Nifty data, first from FMP API, then from Twelve Data API as a fallback,
-        then from Polygon.io API as a third fallback, and appends it to the Google Sheet.
+        then from Polygon.io API as a third fallback, and finally from EODHD API as a fourth fallback.
+        Appends the data to the Google Sheet.
         """
         logging.info("Starting Nifty update for Google Sheet...")
         price = None
@@ -431,10 +434,35 @@ class DataUpdater:
                     elif data_poly.get('status') == 'ERROR':
                          logging.warning(f"Polygon.io API error for Nifty ({symbol_poly}): {data_poly.get('error')}. Trying next source.")
             except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as e:
-                logging.warning(f"Polygon.io API failed for Nifty ({symbol_poly}): {e}. No more sources.")
+                logging.warning(f"Polygon.io API failed for Nifty ({symbol_poly}): {e}. Trying next source.")
             except Exception as e:
-                logging.warning(f"Unexpected error with Polygon.io API for Nifty ({symbol_poly}): {e}. No more sources.")
+                logging.warning(f"Unexpected error with Polygon.io API for Nifty ({symbol_poly}): {e}. Trying next source.")
 
+        # --- Attempt 4: EOD Historical Data (EODHD) API (Fourth Fallback) ---
+        if price is None and Config.API_KEY_EODHD and Config.API_KEY_EODHD != "YOUR_EODHD_API_KEY":
+            logging.info("Attempting to fetch Nifty from EOD Historical Data API (fourth fallback)...")
+            # EODHD ticker for Nifty 50 is typically NSEI.IND
+            symbol_eodhd = 'NSEI.IND'
+            url_eodhd = f"{Config.URLs.EODHD_BASE}/real-time/{symbol_eodhd}"
+            params_eodhd = {
+                "api_token": Config.API_KEY_EODHD,
+                "fmt": "json"
+            }
+
+            try:
+                json_data_raw_eodhd = await fetcher.fetch_url(url_eodhd, params=params_eodhd)
+                if json_data_raw_eodhd:
+                    data_eodhd = json.loads(json_data_raw_eodhd)
+                    if data_eodhd and data_eodhd.get('code') == symbol_eodhd and data_eodhd.get('close') is not None:
+                        price = float(data_eodhd['close'])
+                        source = "EOD Historical Data"
+                        logging.info(f"Successfully fetched Nifty from EODHD: {price}")
+                    elif data_eodhd.get('s') == 'error':
+                        logging.warning(f"EODHD API error for Nifty ({symbol_eodhd}): {data_eodhd.get('message')}. No more sources.")
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                logging.warning(f"EODHD API failed for Nifty ({symbol_eodhd}): {e}. No more sources.")
+            except Exception as e:
+                logging.warning(f"Unexpected error with EODHD API for Nifty ({symbol_eodhd}): {e}. No more sources.")
 
         if price is None:
             logging.error("Failed to fetch Nifty price from all available API sources.")
