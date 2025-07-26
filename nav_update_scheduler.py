@@ -60,13 +60,19 @@ class Files:
     FUND_SHEET: str = "Fund Tracker" # Not directly used in this script's logic
     CACHE_DB: str = f"{Config.DATA_DIR}/cache.db"
 
-    # Sheet IDs pulled from environment variables
+    # Google Sheet IDs pulled from environment variables
     NIFTY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NIFTY_ID", "YOUR_NIFTY_SHEET_ID")
     GOLD_SHEET_ID: str = os.getenv("GOOGLE_SHEET_GOLD_ID", "YOUR_GOLD_SHEET_ID")
     CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
-    # NEW: Google Sheet ID for NAV history
     NAV_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NAV_ID", "YOUR_NAV_SHEET_ID")
-    FRED_SHEET_ID: str = os.getenv("GOOGLE_SHEET_FRED_ID", "1WuiOm26IiU9UoJDFdQXHhDtQERATr6WAfnNr78zNP_w") # UPDATED FRED Sheet ID
+    FRED_SHEET_ID: str = os.getenv("GOOGLE_SHEET_FRED_ID", "1WuiOm26IiU9UoJDFdQXHhDtQERATr6WAfnNr78zNP_w")
+
+    # Worksheet names within each Google Spreadsheet
+    NIFTY_WORKSHEET_NAME: str = "Nifty Data" # Corrected from "Sheet1"
+    GOLD_WORKSHEET_NAME: str = "Gold Prices" # Corrected from "Sheet1"
+    CURRENCY_WORKSHEET_NAME: str = "Currency Rates" # Corrected from "Sheet1"
+    FRED_WORKSHEET_NAME: str = "FRED Data Sheet" # Corrected from "Sheet1"
+    NAV_WORKSHEET_NAME: str = "Sheet1" # Assuming NAV is still "Sheet1" or needs to be provided
 
 
 # Nested URLs class
@@ -141,7 +147,7 @@ class DataCache:
         """
         Stores market data in the cache.
         Uses UPSERT (REPLACE) to avoid duplicate entries for the same data_type and timestamp.
-        TTL is currently not enforced for cleanup but can be used for future expiration logic.
+        TTL is currently not enforced for cleanup but can be used for future expiration expiration logic.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
@@ -215,22 +221,22 @@ class GoogleSheetsManager:
     def append_data(self, sheet_id: str, sheet_name: str, data: List[List[Any]]) -> bool:
         """Appends a list of rows to the specified Google Sheet."""
         if not data:
-            logging.warning(f"No data provided to append to {sheet_name} in sheet {sheet_id}.")
+            logging.warning(f"No data provided to append to sheet ID '{sheet_id}' (Worksheet: '{sheet_name}').") # Enhanced logging
             return True # Consider it a success if nothing to append
         try:
             spreadsheet = self.client.open_by_key(sheet_id)
             worksheet = spreadsheet.worksheet(sheet_name)
             worksheet.append_rows(data, value_input_option='USER_ENTERED')
-            logging.info(f"Successfully appended {len(data)} rows to {sheet_name} in sheet {sheet_id}.")
+            logging.info(f"Successfully appended {len(data)} rows to sheet ID '{sheet_id}' (Worksheet: '{sheet_name}').") # Enhanced logging
             return True
         except gspread.exceptions.SpreadsheetNotFound:
             logging.error(f"Spreadsheet with ID '{sheet_id}' not found. Check ID and sharing permissions.")
             return False
         except gspread.exceptions.WorksheetNotFound:
-            logging.error(f"Worksheet '{sheet_name}' not found in spreadsheet {sheet_id}.")
+            logging.error(f"Worksheet '{sheet_name}' not found in spreadsheet {sheet_id}. Please ensure the worksheet name is correct and case-sensitive.") # Enhanced error message
             return False
         except Exception as e:
-            logging.error(f"Failed to append data to Google Sheet {sheet_id}/{sheet_name}: {e}")
+            logging.error(f"Failed to append data to Google Sheet ID '{sheet_id}' (Worksheet: '{sheet_name}'): {e}") # Enhanced logging
             return False
 
     def get_all_records(self, sheet_id: str, sheet_name: str) -> List[Dict[str, Any]]:
@@ -470,7 +476,8 @@ class DataUpdater:
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         data_row = [today_str, price]
-        success = self.gs_manager.append_data(Config.Files.NIFTY_SHEET_ID, "Sheet1", [data_row])
+        # Use the correct worksheet name here
+        success = self.gs_manager.append_data(Config.Files.NIFTY_SHEET_ID, Config.Files.NIFTY_WORKSHEET_NAME, [data_row])
         
         if success:
             logging.info(f"Updated Nifty price: {price} to Google Sheet via {source}.")
@@ -534,7 +541,8 @@ class DataUpdater:
 
             today_str = datetime.now().strftime("%Y-%m-%d")
             data_row = [today_str, price, "GoldAPI.io"]
-            success = self.gs_manager.append_data(Config.Files.GOLD_SHEET_ID, "Sheet1", [data_row])
+            # Use the correct worksheet name here
+            success = self.gs_manager.append_data(Config.Files.GOLD_SHEET_ID, Config.Files.GOLD_WORKSHEET_NAME, [data_row])
             
             if success:
                 logging.info(f"Updated Gold price: ₹{price} from GoldAPI.io to Google Sheet.")
@@ -611,7 +619,8 @@ class DataUpdater:
                 continue
         
         if all_currency_data_rows:
-            success = self.gs_manager.append_data(Config.Files.CURRENCY_SHEET_ID, "Sheet1", all_currency_data_rows)
+            # Use the correct worksheet name here
+            success = self.gs_manager.append_data(Config.Files.CURRENCY_SHEET_ID, Config.Files.CURRENCY_WORKSHEET_NAME, all_currency_data_rows)
             if success:
                 logging.info(f"Successfully appended {success_count} currency rates to Google Sheet.")
                 return True
@@ -691,8 +700,8 @@ class DataUpdater:
             nav_data_for_sheet = df_nav[['Date', 'Fund Code', 'Fund Name', 'NAV']].values.tolist()
 
             # Append to Google Sheet
-            # Assuming "Sheet1" is the target sheet name for NAV. Consider making this configurable.
-            success = self.gs_manager.append_data(Config.Files.NAV_SHEET_ID, "Sheet1", nav_data_for_sheet)
+            # Use the correct worksheet name here
+            success = self.gs_manager.append_data(Config.Files.NAV_SHEET_ID, Config.Files.NAV_WORKSHEET_NAME, nav_data_for_sheet)
             
             if success:
                 logging.info(f"Successfully appended {len(nav_data_for_sheet)} NAV records to Google Sheet.")
@@ -740,7 +749,8 @@ class DataUpdater:
             date = latest_observation['date'] # FRED date is YYYY-MM-DD
 
             data_row = [date, series_id, value, "FRED"]
-            success = self.gs_manager.append_data(Config.Files.FRED_SHEET_ID, "Sheet1", [data_row])
+            # Use the correct worksheet name here
+            success = self.gs_manager.append_data(Config.Files.FRED_SHEET_ID, Config.Files.FRED_WORKSHEET_NAME, [data_row])
             
             if success:
                 logging.info(f"Updated FRED series {series_id} value: {value} to Google Sheet.")
