@@ -8,7 +8,7 @@ import logging
 from bs4 import BeautifulSoup
 import re
 import shutil
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
 import backoff
 import ratelimit
@@ -64,7 +64,7 @@ class URLs:
     INVESTING_BASE: str = "https://www.investing.com"
     GOLD_URLS: List[str] = [
         "https://www.goodreturns.in/gold-rates/",
-        "https://www.livemint.com/money/personal-finance/gold-rate-in-india",
+        # "https://www.livemint.com/money/personal-finance/gold-rate-in-india", # Removed: Reported as not working
         "https://www.mcxindia.com/market-data/spot-market-price"
     ]
     CURRENCY_ENDPOINTS: Dict[str, str] = {
@@ -342,13 +342,18 @@ class DataUpdater:
                 logging.warning("No HTML fetched for Nifty.")
                 return False
 
-            # Regex to find the last price. This selector might be brittle.
-            match = re.search(r'last\">(\d{4,5}\.\d+)', html)
-            if not match:
-                logging.warning("Could not parse Nifty price from HTML. Selector might have changed.")
+            soup = BeautifulSoup(html, "html.parser")
+            # Using the same robust selector approach as currencies on Investing.com
+            price = self._extract_price_from_soup(soup, [
+                {'tag': 'div', 'data-test': 'instrument-price-last'},
+                {'tag': 'div', 'class_': 'instrument-price-last'},
+                {'tag': 'span', 'class_': 'last-price'} # Fallback
+            ])
+
+            if price is None:
+                logging.warning("Could not parse Nifty price from Investing.com. Selector might have changed.")
                 return False
 
-            price = float(match.group(1))
             today_str = datetime.now().strftime("%Y-%m-%d") # Use YYYY-MM-DD for Sheets
 
             # Append to Google Sheet
@@ -369,59 +374,94 @@ class DataUpdater:
             logging.error(f"Nifty update failed: {str(e)}")
             return False
 
+    def _extract_price_from_soup(self, soup: BeautifulSoup, selectors: List[Dict[str, str]], 
+                                  cleaner: Callable[[str], str] = lambda x: x.strip().replace("₹", "").replace("$", "").replace(",", "")) -> Optional[float]:
+        """
+        Attempts to extract a price from BeautifulSoup object using a list of selectors.
+        Each selector is a dict like {'tag': 'span', 'class_': 'price-value'} or {'id': 'someId'}.
+        Applies a cleaning function before conversion to float.
+        """
+        for selector in selectors:
+            try:
+                tag = soup.find(**selector)
+                if tag and tag.text:
+                    price_text = cleaner(tag.text)
+                    price = float(price_text)
+                    logging.debug(f"Successfully extracted price '{price_text}' using selector {selector}")
+                    return price
+            except (ValueError, TypeError, AttributeError) as e:
+                logging.debug(f"Failed to extract price with selector {selector}: {e}")
+            except Exception as e:
+                logging.debug(f"Unexpected error with selector {selector}: {e}")
+        return None
+
     async def update_gold(self, fetcher: DataFetcher) -> bool:
         """Fetches Gold data from multiple sources and appends to Google Sheet."""
         logging.info("Starting Gold update for Google Sheet...")
+        gold_selectors = {
+            "goodreturns.in": [
+                {'tag': 'td', 'string': re.compile(r"22\s*carat", re.IGNORECASE)} # Needs next_sibling logic
+            ],
+            # Livemint.com removed as per user's report of it not working.
+            # mcxindia.com now has dedicated parsing logic below, not using _extract_price_from_soup
+        }
+
         for url in Config.URLs.GOLD_URLS:
             try:
                 html = await fetcher.fetch_url(url)
                 if not html:
-                    logging.warning(f"No HTML fetched for Gold from {url}.")
-                    continue # Try next URL
+                    logging.warning(f"No HTML fetched for Gold from {url}. Trying next URL.")
+                    continue
 
                 price = None
                 source_name = url.split("//")[1].split("/")[0] # Extract domain for source
+                soup = BeautifulSoup(html, "html.parser")
 
                 if "goodreturns.in" in url:
-                    soup = BeautifulSoup(html, "html.parser")
-                    # This selector targets the 22 carat gold price per 10 grams
-                    tag = soup.find("td", string=re.compile("22 carat", re.IGNORECASE))
+                    # Special handling for goodreturns.in as it requires next_sibling
+                    tag = soup.find("td", string=re.compile(r"22\s*carat", re.IGNORECASE))
                     if tag:
                         price_td = tag.find_next_sibling("td")
                         if price_td and price_td.text:
-                            # goodreturns often shows price per 1 gram, multiply by 10 for 10 grams
-                            price = float(price_td.text.strip().replace("₹", "").replace(",", "")) * 10 
-                            logging.info(f"Parsed Gold price from goodreturns.in: {price}")
-                elif "livemint.com" in url:
-                    soup = BeautifulSoup(html, "html.parser")
-                    # Example selector for Livemint, needs verification
-                    # Look for a tag that typically holds the gold price, e.g., a span with a specific class
-                    # price_tag = soup.find('span', class_='price-value') 
-                    # if price_tag:
-                    #     price = float(price_tag.text.strip().replace("₹", "").replace(",", ""))
-                    logging.warning(f"Parsing logic for livemint.com not implemented. Skipping {url}")
-                    continue
+                            try:
+                                # goodreturns often shows price per 1 gram, multiply by 10 for 10 grams
+                                price = float(price_td.text.strip().replace("₹", "").replace(",", "")) * 10
+                                logging.info(f"Parsed Gold price from goodreturns.in: {price}")
+                            except ValueError as ve:
+                                logging.warning(f"Could not convert goodreturns.in gold price '{price_td.text.strip()}' to float: {ve}")
+                                price = None
+                    if price is None:
+                        logging.warning(f"Could not find 22 carat gold price on goodreturns.in from {url}.")
+                
                 elif "mcxindia.com" in url:
-                    soup = BeautifulSoup(html, "html.parser")
-                    # Example selector for MCX India, needs verification
-                    # price_tag = soup.find('div', class_='spot-price')
-                    # if price_tag:
-                    #     price = float(price_tag.text.strip().replace(",", ""))
-                    logging.warning(f"Parsing logic for mcxindia.com not implemented. Skipping {url}")
-                    continue
+                    # Specific parsing logic for mcxindia.com based on provided screenshot
+                    gold_symbol_td = soup.find("td", class_="symbol", string="GOLD")
+                    if gold_symbol_td:
+                        # The price is in the 4th td (index 3) of the same row
+                        # Assuming the structure is <td>GOLD</td> <td>Unit</td> <td>Location</td> <td>Spot Price</td>
+                        parent_tr = gold_symbol_td.find_parent("tr")
+                        if parent_tr:
+                            all_tds_in_row = parent_tr.find_all("td")
+                            # Ensure there are enough columns and the 4th td exists
+                            if len(all_tds_in_row) > 3 and all_tds_in_row[3]: 
+                                price_td = all_tds_in_row[3] # 4th td is at index 3
+                                if price_td and price_td.text:
+                                    try:
+                                        price = float(price_td.text.strip().replace(",", ""))
+                                        logging.info(f"Parsed Gold price from mcxindia.com: {price}")
+                                    except ValueError as ve:
+                                        logging.warning(f"Could not convert mcxindia.com gold price '{price_td.text.strip()}' to float: {ve}")
+                                        price = None
+                    if price is None:
+                        logging.warning(f"Could not parse gold price from mcxindia.com: {url}. Table structure or selectors might have changed.")
 
                 if price:
                     today_str = datetime.now().strftime("%Y-%m-%d")
-
-                    # Append to Google Sheet
-                    # Ensure your Google Sheet has columns like "Date", "Price", "Source"
                     data_row = [today_str, price, source_name]
-                    # Assuming "Sheet1" is the target sheet name. Consider making this configurable.
                     success = self.gs_manager.append_data(Config.Files.GOLD_SHEET_ID, "Sheet1", [data_row])
                     
                     if success:
                         logging.info(f"Updated Gold price: ₹{price} from {url} to Google Sheet.")
-                        # Cache the Gold data
                         await self.cache.set("Gold", MarketData(datetime.now(), price, source_name))
                         return True # Return True as soon as one source succeeds
                     else:
@@ -441,51 +481,54 @@ class DataUpdater:
         success_count = 0
         all_currency_data_rows = []
 
+        currency_selectors = {
+            "investing.com": [
+                {'tag': 'div', 'data-test': 'instrument-price-last'}, # Derived from screenshot
+                {'tag': 'div', 'class_': 'instrument-price-last'}, # Fallback
+                {'tag': 'span', 'class_': 'last-price'} # Another common class fallback
+            ],
+            "coindesk.com": [
+                {'tag': 'span', 'class_': 'currency-price'}, # Derived from screenshot
+                {'tag': 'div', 'class_': 'CoinDeskcoinPrice'} # Placeholder fallback
+            ]
+        }
+
         for currency_pair, endpoint in Config.URLs.CURRENCY_ENDPOINTS.items():
             url = f"{Config.URLs.INVESTING_BASE}{endpoint}" if not endpoint.startswith("http") else endpoint
             try:
                 html = await fetcher.fetch_url(url)
                 if not html:
-                    logging.warning(f"No HTML fetched for {currency_pair} from {url}")
+                    logging.warning(f"No HTML fetched for {currency_pair} from {url}. Skipping.")
                     continue
 
                 price = None
                 source_name = url.split("//")[1].split("/")[0] if url.startswith("http") else "Investing.com"
+                soup = BeautifulSoup(html, "html.parser")
 
                 if "investing.com" in url:
-                    soup = BeautifulSoup(html, "html.parser")
-                    # This selector needs verification as website structures change
-                    price_tag = soup.find('div', class_='instrument-price-last') 
-                    if price_tag:
-                        price = float(price_tag.text.strip().replace(',', ''))
-                        logging.info(f"Parsed {currency_pair} price from investing.com: {price}")
+                    price = self._extract_price_from_soup(soup, currency_selectors["investing.com"])
+                    if price is None:
+                        logging.warning(f"Could not parse price for {currency_pair} from investing.com: {url}. Selectors might have changed.")
+                
                 elif "coindesk.com" in url:
-                    soup = BeautifulSoup(html, "html.parser")
-                    # This selector needs verification as website structures change
-                    price_tag = soup.find('span', class_='currency-price') 
-                    if price_tag:
-                        price = float(price_tag.text.strip().replace('₹', '').replace(',', ''))
-                        logging.info(f"Parsed {currency_pair} price from coindesk.com: {price}")
+                    price = self._extract_price_from_soup(soup, currency_selectors["coindesk.com"])
+                    if price is None:
+                        logging.warning(f"Could not parse price for {currency_pair} from coindesk.com: {url}. Selectors might have changed.")
 
                 if price:
                     today_str = datetime.now().strftime("%Y-%m-%d")
-                    # Prepare row for Google Sheet
-                    # Ensure your Google Sheet has columns like "Date", "CurrencyPair", "Rate", "Source"
                     all_currency_data_rows.append([today_str, currency_pair, price, source_name])
                     logging.info(f"Prepared {currency_pair} rate: {price} from {url} for Google Sheet.")
                     success_count += 1
-                    # Cache the currency data
                     await self.cache.set(f"Currency_{currency_pair}", MarketData(datetime.now(), price, source_name))
                 else:
-                    logging.warning(f"Could not parse price for {currency_pair} from {url}. Selector might have changed.")
-
+                    logging.warning(f"Could not parse price for {currency_pair} from {url}. Skipping this currency pair.")
+                    continue # Continue to next currency pair even if one fails
             except Exception as e:
                 logging.error(f"Currency update failed for {currency_pair} from {url}: {str(e)}")
                 continue # Continue to next currency pair even if one fails
         
         if all_currency_data_rows:
-            # Append all collected currency data in one go
-            # Assuming "Sheet1" is the target sheet name. Consider making this configurable.
             success = self.gs_manager.append_data(Config.Files.CURRENCY_SHEET_ID, "Sheet1", all_currency_data_rows)
             if success:
                 logging.info(f"Successfully appended {success_count} currency rates to Google Sheet.")
@@ -499,10 +542,10 @@ class DataUpdater:
 
     async def update_nav(self, fetcher: DataFetcher) -> bool:
         """
-        Fetches Mutual Fund NAV data from AMFI and merges it into a local CSV.
-        Consider migrating this to Google Sheets for consistency if desired.
+        Fetches Mutual Fund NAV data from AMFI and appends it to a Google Sheet.
+        This replaces the local CSV storage for NAV history.
         """
-        logging.info("Starting NAV update...")
+        logging.info("Starting NAV update for Google Sheet...")
         try:
             nav_data_raw = await fetcher.fetch_url(Config.URLs.AMFI_NAV)
             if not nav_data_raw:
@@ -555,17 +598,27 @@ class DataUpdater:
             df_nav['NAV'] = pd.to_numeric(df_nav['NAV'], errors='coerce')
             df_nav = df_nav.dropna(subset=['NAV']) # Drop rows where NAV could not be converted
 
-            # Convert Date to datetime object for merging
+            # Convert Date to datetime object for Google Sheets (YYYY-MM-DD)
             # AMFI date format is typically 'DD-Mon-YYYY' (e.g., '25-Jul-2025')
             df_nav['Date'] = pd.to_datetime(df_nav['Date'], format='%d-%b-%Y', errors='coerce')
             df_nav = df_nav.dropna(subset=['Date']) # Drop rows where date conversion failed
-            df_nav['Date'] = df_nav['Date'].dt.strftime('%Y-%m-%d') # Standardize date format for CSV
+            df_nav['Date'] = df_nav['Date'].dt.strftime('%Y-%m-%d') # Standardize date format for Sheets
 
-            # Merge with existing NAV history (still to local CSV for now)
-            self._safe_merge_csv(Config.Files.NAV_HISTORY_CSV, df_nav, ["Date", "Fund Code"], "%Y-%m-%d")
+            # Prepare data for Google Sheets (list of lists)
+            # Ensure your Google Sheet has columns like "Date", "Fund Code", "Fund Name", "NAV"
+            nav_data_for_sheet = df_nav[['Date', 'Fund Code', 'Fund Name', 'NAV']].values.tolist()
+
+            # Append to Google Sheet
+            # Assuming "Sheet1" is the target sheet name for NAV. Consider making this configurable.
+            success = self.gs_manager.append_data(Config.Files.NAV_SHEET_ID, "Sheet1", nav_data_for_sheet)
             
-            logging.info(f"Successfully updated NAV history with {len(df_nav)} records.")
-            return True
+            if success:
+                logging.info(f"Successfully appended {len(nav_data_for_sheet)} NAV records to Google Sheet.")
+                # Cache the NAV update status
+                await self.cache.set("NAV_Update_Status", MarketData(datetime.now(), len(nav_data_for_sheet), "AMFI", {"records_count": len(nav_data_for_sheet)}))
+            else:
+                logging.error(f"Failed to write NAV data to Google Sheet.")
+            return success
 
         except Exception as e:
             logging.error(f"NAV update failed: {str(e)}")
@@ -599,7 +652,7 @@ async def main():
             updater.update_nifty(fetcher),
             updater.update_gold(fetcher),
             updater.update_currency(fetcher),
-            updater.update_nav(fetcher), # NAV history still updates local CSV for now
+            updater.update_nav(fetcher), # NAV history now updates Google Sheet
         ]
         # Run all update tasks concurrently. return_exceptions=True allows all tasks to complete
         # even if some fail, and their exceptions are returned as results.
