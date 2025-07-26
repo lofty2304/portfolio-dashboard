@@ -12,7 +12,6 @@ from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
 import backoff
 import ratelimit
-import aiosqlite
 import json
 
 # For Google Sheets Integration
@@ -41,6 +40,15 @@ Config.RETRY_ATTEMPTS: int = 3
 Config.REQUEST_TIMEOUT: int = 10
 Config.RATE_LIMIT: int = 2 # Calls per period (e.g., 2 calls per 2 seconds)
 
+# NEW: API Keys for new services
+Config.API_KEY_EXCHANGE_RATE: str = os.getenv("EXCHANGE_RATE_API_KEY", "YOUR_EXCHANGE_RATE_API_KEY")
+Config.API_KEY_FMP: str = os.getenv("FMP_API_KEY", "YOUR_FMP_API_KEY")
+Config.API_KEY_GOLDAPI: str = os.getenv("GOLDAPI_API_KEY", "YOUR_GOLDAPI_API_KEY") # NEW GoldAPI Key
+Config.API_KEY_FRED: str = os.getenv("FRED_API_KEY", "YOUR_FRED_API_KEY") # NEW FRED API Key
+Config.API_KEY_TWELVE_DATA: str = os.getenv("TWELVE_DATA_API_KEY", "YOUR_TWELVE_DATA_API_KEY") # NEW Twelve Data API Key
+Config.API_KEY_POLYGON: str = os.getenv("POLYGON_API_KEY", "YOUR_POLYGON_API_KEY") # NEW Polygon.io API Key
+
+
 # Nested Files class safely referencing Config
 class Files:
     """File paths and Google Sheet IDs."""
@@ -56,22 +64,27 @@ class Files:
     CURRENCY_SHEET_ID: str = os.getenv("GOOGLE_SHEET_CURRENCY_ID", "YOUR_CURRENCY_SHEET_ID")
     # NEW: Google Sheet ID for NAV history
     NAV_SHEET_ID: str = os.getenv("GOOGLE_SHEET_NAV_ID", "YOUR_NAV_SHEET_ID")
+    FRED_SHEET_ID: str = os.getenv("GOOGLE_SHEET_FRED_ID", "1WuiOm26IiU9UoJDFdQXHhDtQERATr6WAfnNr78zNP_w") # UPDATED FRED Sheet ID
 
 
 # Nested URLs class
 class URLs:
     """URLs for data fetching."""
-    INVESTING_BASE: str = "https://www.investing.com"
+    INVESTING_BASE: str = "https://www.investing.com" # Still used for Nifty if FMP/Twelve Data/Polygon fails or for other data
+    
+    # NEW API Base URLs
+    EXCHANGE_RATE_BASE: str = "https://v6.exchangerate-api.com/v6"
+    FMP_BASE: str = "https://financialmodelingprep.com/api/v3"
+    GOLDAPI_BASE: str = "https://www.goldapi.io/api" # NEW GoldAPI Base URL
+    FRED_BASE: str = "https://api.stlouisfed.org/fred" # NEW FRED API Base URL
+    TWELVE_DATA_BASE: str = "https://api.twelvedata.com" # NEW Twelve Data API Base URL
+    POLYGON_BASE: str = "https://api.polygon.io" # NEW Polygon.io API Base URL
+
+    # Gold URLs now only for API, web scraping URLs removed
     GOLD_URLS: List[str] = [
-        "https://www.goodreturns.in/gold-rates/",
-        # "https://www.livemint.com/money/personal-finance/gold-rate-in-india", # Removed: Reported as not working
-        "https://www.mcxindia.com/market-data/spot-market-price"
+        # "https://www.goodreturns.in/gold-rates/", # Removed: Using GoldAPI.io
+        # "https://www.mcxindia.com/market-data/spot-market-price" # Removed: Using GoldAPI.io
     ]
-    CURRENCY_ENDPOINTS: Dict[str, str] = {
-        "USDINR": "/currencies/usd-inr",
-        "EURINR": "/currencies/eur-inr",
-        "BTCINR": "https://www.coindesk.com/price/bitcoin/"
-    }
     AMFI_NAV: str = "https://www.amfiindia.com/spages/NAVAll.txt"
 
 # Attach nested classes to Config
@@ -259,13 +272,14 @@ class DataFetcher:
                           max_tries=Config.RETRY_ATTEMPTS,
                           factor=Config.RATE_LIMIT)
     @ratelimit.limits(calls=1, period=Config.RATE_LIMIT)
-    async def fetch_url(self, url: str) -> Optional[str]:
+    async def fetch_url(self, url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Optional[str]:
         """
         Fetches content from a given URL with retries and rate limiting.
+        Supports optional parameters and headers for API calls.
         """
-        logging.info(f"Attempting to fetch URL: {url}")
+        logging.info(f"Attempting to fetch URL: {url} with params: {params} and headers: {headers}")
         try:
-            async with self.session.get(url, timeout=Config.REQUEST_TIMEOUT) as response:
+            async with self.session.get(url, params=params, headers=headers, timeout=Config.REQUEST_TIMEOUT) as response:
                 response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
                 text = await response.text()
                 logging.info(f"Successfully fetched URL: {url}")
@@ -334,45 +348,107 @@ class DataUpdater:
             raise
 
     async def update_nifty(self, fetcher: DataFetcher) -> bool:
-        """Fetches Nifty data and appends it to the Google Sheet."""
+        """
+        Fetches Nifty data, first from FMP API, then from Twelve Data API as a fallback,
+        then from Polygon.io API as a third fallback, and appends it to the Google Sheet.
+        """
         logging.info("Starting Nifty update for Google Sheet...")
-        try:
-            html = await fetcher.fetch_url(f"{Config.URLs.INVESTING_BASE}/indices/s-p-cnx-nifty")
-            if not html:
-                logging.warning("No HTML fetched for Nifty.")
-                return False
+        price = None
+        source = None
 
-            soup = BeautifulSoup(html, "html.parser")
-            # Using the same robust selector approach as currencies on Investing.com
-            price = self._extract_price_from_soup(soup, [
-                {'tag': 'div', 'data-test': 'instrument-price-last'},
-                {'tag': 'div', 'class_': 'instrument-price-last'},
-                {'tag': 'span', 'class_': 'last-price'} # Fallback
-            ])
+        # --- Attempt 1: Financial Modeling Prep (FMP) API ---
+        if Config.API_KEY_FMP and Config.API_KEY_FMP != "YOUR_FMP_API_KEY":
+            logging.info("Attempting to fetch Nifty from Financial Modeling Prep API...")
+            symbol = '^NSEI' # Common symbol for Nifty 50. Verify FMP documentation for free tier support.
+            params = {"apikey": Config.API_KEY_FMP}
+            url = f"{Config.URLs.FMP_BASE}/quote/{symbol}"
 
-            if price is None:
-                logging.warning("Could not parse Nifty price from Investing.com. Selector might have changed.")
-                return False
+            try:
+                json_data_raw = await fetcher.fetch_url(url, params=params)
+                if json_data_raw:
+                    data = json.loads(json_data_raw)
+                    if data and len(data) > 0 and data[0].get('price') is not None:
+                        price = float(data[0]['price'])
+                        source = "Financial Modeling Prep"
+                        logging.info(f"Successfully fetched Nifty from FMP: {price}")
+            except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as e:
+                logging.warning(f"FMP API failed for Nifty ({symbol}): {e}. Trying next source.")
+            except Exception as e:
+                logging.warning(f"Unexpected error with FMP API for Nifty ({symbol}): {e}. Trying next source.")
 
-            today_str = datetime.now().strftime("%Y-%m-%d") # Use YYYY-MM-DD for Sheets
+        # --- Attempt 2: Twelve Data API (Fallback) ---
+        if price is None and Config.API_KEY_TWELVE_DATA and Config.API_KEY_TWELVE_DATA != "YOUR_TWELVE_DATA_API_KEY":
+            logging.info("Attempting to fetch Nifty from Twelve Data API (fallback)...")
+            # Twelve Data symbol for Nifty 50 might be 'NIFTY_50' or '^NSEI' depending on exchange.
+            # 'NIFTY_50' is often more reliable for indices on Twelve Data.
+            symbol_td = 'NIFTY_50' 
+            params_td = {
+                "symbol": symbol_td,
+                "interval": "1min", # Using 1min for latest price, adjust as needed (e.g., '1day' for daily close)
+                "apikey": Config.API_KEY_TWELVE_DATA
+            }
+            url_td = f"{Config.URLs.TWELVE_DATA_BASE}/time_series"
 
-            # Append to Google Sheet
-            # Ensure your Google Sheet has columns like "Date", "Close"
-            data_row = [today_str, price]
-            # Assuming "Sheet1" is the target sheet name. Consider making this configurable.
-            success = self.gs_manager.append_data(Config.Files.NIFTY_SHEET_ID, "Sheet1", [data_row])
-            
-            if success:
-                logging.info(f"Updated Nifty price: {price} to Google Sheet.")
-                # Cache the Nifty data
-                await self.cache.set("Nifty", MarketData(datetime.now(), price, "Investing.com"))
-            else:
-                logging.error(f"Failed to write Nifty price {price} to Google Sheet.")
-            return success
+            try:
+                json_data_raw_td = await fetcher.fetch_url(url_td, params=params_td)
+                if json_data_raw_td:
+                    data_td = json.loads(json_data_raw_td)
+                    if data_td and data_td.get('status') == 'ok' and data_td.get('values') and len(data_td['values']) > 0:
+                        # Get the latest close price
+                        price = float(data_td['values'][0]['close'])
+                        source = "Twelve Data"
+                        logging.info(f"Successfully fetched Nifty from Twelve Data: {price}")
+                    elif data_td.get('status') == 'error':
+                        logging.warning(f"Twelve Data API error for Nifty ({symbol_td}): {data_td.get('message')}. Trying next source.")
+            except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as e:
+                logging.warning(f"Twelve Data API failed for Nifty ({symbol_td}): {e}. Trying next source.")
+            except Exception as e:
+                logging.warning(f"Unexpected error with Twelve Data API for Nifty ({symbol_td}): {e}. Trying next source.")
 
-        except Exception as e:
-            logging.error(f"Nifty update failed: {str(e)}")
+        # --- Attempt 3: Polygon.io API (Third Fallback) ---
+        if price is None and Config.API_KEY_POLYGON and Config.API_KEY_POLYGON != "YOUR_POLYGON_API_KEY":
+            logging.info("Attempting to fetch Nifty from Polygon.io API (third fallback)...")
+            # Polygon.io ticker for Nifty 50 is typically I:NSE50
+            symbol_poly = 'I:NSE50' 
+            # Using /v2/aggs/ticker/{ticker}/prev for previous day's close
+            url_poly = f"{Config.URLs.POLYGON_BASE}/v2/aggs/ticker/{symbol_poly}/prev"
+            params_poly = {
+                "apiKey": Config.API_KEY_POLYGON
+            }
+
+            try:
+                json_data_raw_poly = await fetcher.fetch_url(url_poly, params=params_poly)
+                if json_data_raw_poly:
+                    data_poly = json.loads(json_data_raw_poly)
+                    if data_poly and data_poly.get('status') == 'OK' and data_poly.get('results') and len(data_poly['results']) > 0:
+                        # Get the close price from the results array
+                        price = float(data_poly['results'][0]['c']) # 'c' stands for close price
+                        source = "Polygon.io"
+                        logging.info(f"Successfully fetched Nifty from Polygon.io: {price}")
+                    elif data_poly.get('status') == 'NOT_FOUND':
+                         logging.warning(f"Polygon.io API error for Nifty ({symbol_poly}): Symbol not found. Trying next source.")
+                    elif data_poly.get('status') == 'ERROR':
+                         logging.warning(f"Polygon.io API error for Nifty ({symbol_poly}): {data_poly.get('error')}. Trying next source.")
+            except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as e:
+                logging.warning(f"Polygon.io API failed for Nifty ({symbol_poly}): {e}. No more sources.")
+            except Exception as e:
+                logging.warning(f"Unexpected error with Polygon.io API for Nifty ({symbol_poly}): {e}. No more sources.")
+
+
+        if price is None:
+            logging.error("Failed to fetch Nifty price from all available API sources.")
             return False
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        data_row = [today_str, price]
+        success = self.gs_manager.append_data(Config.Files.NIFTY_SHEET_ID, "Sheet1", [data_row])
+        
+        if success:
+            logging.info(f"Updated Nifty price: {price} to Google Sheet via {source}.")
+            await self.cache.set("Nifty", MarketData(datetime.now(), price, source))
+        else:
+            logging.error(f"Failed to write Nifty price {price} to Google Sheet.")
+        return success
 
     def _extract_price_from_soup(self, soup: BeautifulSoup, selectors: List[Dict[str, str]], 
                                   cleaner: Callable[[str], str] = lambda x: x.strip().replace("₹", "").replace("$", "").replace(",", "")) -> Optional[float]:
@@ -396,137 +472,114 @@ class DataUpdater:
         return None
 
     async def update_gold(self, fetcher: DataFetcher) -> bool:
-        """Fetches Gold data from multiple sources and appends to Google Sheet."""
-        logging.info("Starting Gold update for Google Sheet...")
-        gold_selectors = {
-            "goodreturns.in": [
-                {'tag': 'td', 'string': re.compile(r"22\s*carat", re.IGNORECASE)} # Needs next_sibling logic
-            ],
-            # Livemint.com removed as per user's report of it not working.
-            # mcxindia.com now has dedicated parsing logic below, not using _extract_price_from_soup
+        """Fetches Gold data from GoldAPI.io and appends to Google Sheet."""
+        logging.info("Starting Gold update for Google Sheet via GoldAPI.io...")
+        if not Config.API_KEY_GOLDAPI or Config.API_KEY_GOLDAPI == "YOUR_GOLDAPI_API_KEY":
+            logging.error("GoldAPI.io key not set. Skipping Gold update.")
+            return False
+
+        # GoldAPI.io endpoint for XAU (Gold) in INR
+        url = f"{Config.URLs.GOLDAPI_BASE}/XAU/INR"
+        headers = {
+            "x-access-token": Config.API_KEY_GOLDAPI,
+            "Content-Type": "application/json"
         }
 
-        for url in Config.URLs.GOLD_URLS:
-            try:
-                html = await fetcher.fetch_url(url)
-                if not html:
-                    logging.warning(f"No HTML fetched for Gold from {url}. Trying next URL.")
-                    continue
+        try:
+            json_data_raw = await fetcher.fetch_url(url, headers=headers)
+            if not json_data_raw:
+                logging.warning(f"No data fetched for Gold from GoldAPI.io.")
+                return False
+            
+            data = json.loads(json_data_raw)
 
-                price = None
-                source_name = url.split("//")[1].split("/")[0] # Extract domain for source
-                soup = BeautifulSoup(html, "html.parser")
+            if data.get("error"):
+                logging.error(f"GoldAPI.io error: {data['error']}. Response: {data}")
+                return False
+            
+            # GoldAPI.io provides 'price'
+            price = float(data.get('price'))
+            if price is None:
+                logging.warning(f"Could not find 'price' in GoldAPI.io response. Response: {data}")
+                return False
 
-                if "goodreturns.in" in url:
-                    # Special handling for goodreturns.in as it requires next_sibling
-                    tag = soup.find("td", string=re.compile(r"22\s*carat", re.IGNORECASE))
-                    if tag:
-                        price_td = tag.find_next_sibling("td")
-                        if price_td and price_td.text:
-                            try:
-                                # goodreturns often shows price per 1 gram, multiply by 10 for 10 grams
-                                price = float(price_td.text.strip().replace("₹", "").replace(",", "")) * 10
-                                logging.info(f"Parsed Gold price from goodreturns.in: {price}")
-                            except ValueError as ve:
-                                logging.warning(f"Could not convert goodreturns.in gold price '{price_td.text.strip()}' to float: {ve}")
-                                price = None
-                    if price is None:
-                        logging.warning(f"Could not find 22 carat gold price on goodreturns.in from {url}.")
-                
-                elif "mcxindia.com" in url:
-                    # Specific parsing logic for mcxindia.com based on provided screenshot
-                    gold_symbol_td = soup.find("td", class_="symbol", string="GOLD")
-                    if gold_symbol_td:
-                        # The price is in the 4th td (index 3) of the same row
-                        # Assuming the structure is <td>GOLD</td> <td>Unit</td> <td>Location</td> <td>Spot Price</td>
-                        parent_tr = gold_symbol_td.find_parent("tr")
-                        if parent_tr:
-                            all_tds_in_row = parent_tr.find_all("td")
-                            # Ensure there are enough columns and the 4th td exists
-                            if len(all_tds_in_row) > 3 and all_tds_in_row[3]: 
-                                price_td = all_tds_in_row[3] # 4th td is at index 3
-                                if price_td and price_td.text:
-                                    try:
-                                        price = float(price_td.text.strip().replace(",", ""))
-                                        logging.info(f"Parsed Gold price from mcxindia.com: {price}")
-                                    except ValueError as ve:
-                                        logging.warning(f"Could not convert mcxindia.com gold price '{price_td.text.strip()}' to float: {ve}")
-                                        price = None
-                    if price is None:
-                        logging.warning(f"Could not parse gold price from mcxindia.com: {url}. Table structure or selectors might have changed.")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            data_row = [today_str, price, "GoldAPI.io"]
+            success = self.gs_manager.append_data(Config.Files.GOLD_SHEET_ID, "Sheet1", [data_row])
+            
+            if success:
+                logging.info(f"Updated Gold price: ₹{price} from GoldAPI.io to Google Sheet.")
+                await self.cache.set("Gold", MarketData(datetime.now(), price, "GoldAPI.io"))
+                return True
+            else:
+                logging.error(f"Failed to write Gold price {price} from GoldAPI.io to Google Sheet.")
+                return False
 
-                if price:
-                    today_str = datetime.now().strftime("%Y-%m-%d")
-                    data_row = [today_str, price, source_name]
-                    success = self.gs_manager.append_data(Config.Files.GOLD_SHEET_ID, "Sheet1", [data_row])
-                    
-                    if success:
-                        logging.info(f"Updated Gold price: ₹{price} from {url} to Google Sheet.")
-                        await self.cache.set("Gold", MarketData(datetime.now(), price, source_name))
-                        return True # Return True as soon as one source succeeds
-                    else:
-                        logging.error(f"Failed to write Gold price {price} from {url} to Google Sheet.")
-                        continue # Try next URL if writing fails
-
-            except Exception as e:
-                logging.error(f"Gold update failed for {url}: {str(e)}")
-                continue # Try next URL
-
-        logging.error("All Gold update sources failed or parsing logic not implemented for all.")
-        return False
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to decode JSON from GoldAPI.io: {e}")
+            return False
+        except KeyError as e:
+            logging.error(f"Missing key in GoldAPI.io response: {e}. Response: {data}")
+            return False
+        except Exception as e:
+            logging.error(f"Gold update failed via GoldAPI.io: {str(e)}")
+            return False
 
     async def update_currency(self, fetcher: DataFetcher) -> bool:
-        """Fetches currency data for multiple pairs and appends to Google Sheet."""
-        logging.info("Starting currency update for Google Sheet...")
+        """Fetches currency data from ExchangeRate-API and appends to Google Sheet."""
+        logging.info("Starting currency update for Google Sheet via ExchangeRate-API...")
+        if not Config.API_KEY_EXCHANGE_RATE or Config.API_KEY_EXCHANGE_RATE == "YOUR_EXCHANGE_RATE_API_KEY":
+            logging.error("ExchangeRate-API key not set. Skipping currency update.")
+            return False
+
+        # Define base currencies for ExchangeRate-API
+        # ExchangeRate-API works by fetching 'latest' rates for a BASE currency
+        # and then you extract the target currency from the 'rates' object.
+        base_currencies_to_fetch = {
+            "USDINR": "USD",
+            "EURINR": "EUR",
+            "BTCINR": "BTC" # ExchangeRate-API primarily fiat, BTC might not work here.
+        }
+        target_currency = "INR"
+        
         success_count = 0
         all_currency_data_rows = []
 
-        currency_selectors = {
-            "investing.com": [
-                {'tag': 'div', 'data-test': 'instrument-price-last'}, # Derived from screenshot
-                {'tag': 'div', 'class_': 'instrument-price-last'}, # Fallback
-                {'tag': 'span', 'class_': 'last-price'} # Another common class fallback
-            ],
-            "coindesk.com": [
-                {'tag': 'span', 'class_': 'currency-price'}, # Derived from screenshot
-                {'tag': 'div', 'class_': 'CoinDeskcoinPrice'} # Placeholder fallback
-            ]
-        }
-
-        for currency_pair, endpoint in Config.URLs.CURRENCY_ENDPOINTS.items():
-            url = f"{Config.URLs.INVESTING_BASE}{endpoint}" if not endpoint.startswith("http") else endpoint
+        for currency_pair, base_currency in base_currencies_to_fetch.items():
+            url = f"{Config.URLs.EXCHANGE_RATE_BASE}/{Config.API_KEY_EXCHANGE_RATE}/latest/{base_currency}"
+            
             try:
-                html = await fetcher.fetch_url(url)
-                if not html:
-                    logging.warning(f"No HTML fetched for {currency_pair} from {url}. Skipping.")
+                json_data_raw = await fetcher.fetch_url(url)
+                if not json_data_raw:
+                    logging.warning(f"No data fetched for {currency_pair} from ExchangeRate-API (base: {base_currency}).")
+                    continue
+                
+                data = json.loads(json_data_raw)
+
+                if data.get("result") != "success":
+                    logging.error(f"ExchangeRate-API error for {currency_pair} (base: {base_currency}): {data.get('error-type', 'Unknown error')}")
+                    continue
+                if target_currency not in data.get("rates", {}):
+                    logging.warning(f"Target currency '{target_currency}' not found in rates for {currency_pair} (base: {base_currency}). This may happen for crypto pairs like BTCINR. Response: {data}")
                     continue
 
-                price = None
-                source_name = url.split("//")[1].split("/")[0] if url.startswith("http") else "Investing.com"
-                soup = BeautifulSoup(html, "html.parser")
+                price = float(data["rates"][target_currency])
+                today_str = datetime.now().strftime("%Y-%m-%d")
 
-                if "investing.com" in url:
-                    price = self._extract_price_from_soup(soup, currency_selectors["investing.com"])
-                    if price is None:
-                        logging.warning(f"Could not parse price for {currency_pair} from investing.com: {url}. Selectors might have changed.")
-                
-                elif "coindesk.com" in url:
-                    price = self._extract_price_from_soup(soup, currency_selectors["coindesk.com"])
-                    if price is None:
-                        logging.warning(f"Could not parse price for {currency_pair} from coindesk.com: {url}. Selectors might have changed.")
-
-                if price:
-                    today_str = datetime.now().strftime("%Y-%m-%d")
-                    all_currency_data_rows.append([today_str, currency_pair, price, source_name])
-                    logging.info(f"Prepared {currency_pair} rate: {price} from {url} for Google Sheet.")
-                    success_count += 1
-                    await self.cache.set(f"Currency_{currency_pair}", MarketData(datetime.now(), price, source_name))
-                else:
-                    logging.warning(f"Could not parse price for {currency_pair} from {url}. Skipping this currency pair.")
-                    continue # Continue to next currency pair even if one fails
+                all_currency_data_rows.append([today_str, currency_pair, price, "ExchangeRate-API"])
+                logging.info(f"Prepared {currency_pair} rate: {price} from ExchangeRate-API for Google Sheet.")
+                success_count += 1
+                await self.cache.set(f"Currency_{currency_pair}", MarketData(datetime.now(), price, "ExchangeRate-API"))
+            
+            except json.JSONDecodeError as e:
+                logging.error(f"Failed to decode JSON from ExchangeRate-API for {currency_pair} (base: {base_currency}): {e}")
+                continue
+            except KeyError as e:
+                logging.error(f"Missing key in ExchangeRate-API response for {currency_pair} (base: {base_currency}): {e}. Response: {data}")
+                continue
             except Exception as e:
-                logging.error(f"Currency update failed for {currency_pair} from {url}: {str(e)}")
-                continue # Continue to next currency pair even if one fails
+                logging.error(f"Currency update failed for {currency_pair} via ExchangeRate-API: {str(e)}")
+                continue
         
         if all_currency_data_rows:
             success = self.gs_manager.append_data(Config.Files.CURRENCY_SHEET_ID, "Sheet1", all_currency_data_rows)
@@ -624,6 +677,59 @@ class DataUpdater:
             logging.error(f"NAV update failed: {str(e)}")
             return False
 
+    async def update_fred_data(self, fetcher: DataFetcher) -> bool:
+        """Fetches FRED data (e.g., India CPI) and appends to Google Sheet."""
+        logging.info("Starting FRED data update for Google Sheet...")
+        if not Config.API_KEY_FRED or Config.API_KEY_FRED == "YOUR_FRED_API_KEY":
+            logging.error("FRED API key not set. Skipping FRED data update.")
+            return False
+
+        series_id = 'CPALTT01INM657N' # Consumer Price Index: All Items for India
+        url = f"{Config.URLs.FRED_BASE}/series/observations"
+        params = {
+            "series_id": series_id,
+            "api_key": Config.API_KEY_FRED,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 1 # Get only the latest observation
+        }
+
+        try:
+            json_data_raw = await fetcher.fetch_url(url, params=params)
+            if not json_data_raw:
+                logging.warning(f"No data fetched for FRED series {series_id}.")
+                return False
+            
+            data = json.loads(json_data_raw)
+
+            if not data.get("observations") or len(data["observations"]) == 0:
+                logging.warning(f"FRED API returned no observations for series {series_id}. Response: {data}")
+                return False
+
+            latest_observation = data["observations"][0]
+            value = float(latest_observation['value'])
+            date = latest_observation['date'] # FRED date is YYYY-MM-DD
+
+            data_row = [date, series_id, value, "FRED"]
+            success = self.gs_manager.append_data(Config.Files.FRED_SHEET_ID, "Sheet1", [data_row])
+            
+            if success:
+                logging.info(f"Updated FRED series {series_id} value: {value} to Google Sheet.")
+                await self.cache.set(f"FRED_{series_id}", MarketData(datetime.now(), value, "FRED", {"series_id": series_id}))
+            else:
+                logging.error(f"Failed to write FRED series {series_id} to Google Sheet.")
+            return success
+
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to decode JSON from FRED API for series {series_id}: {e}")
+            return False
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            logging.error(f"Missing key/invalid structure in FRED API response for series {series_id}: {e}. Response: {data}")
+            return False
+        except Exception as e:
+            logging.error(f"FRED data update failed for series {series_id}: {str(e)}")
+            return False
+
 async def main():
     """Main function to orchestrate the data fetching and updating process."""
     # Retrieve Google Service Account credentials from environment variable
@@ -653,6 +759,7 @@ async def main():
             updater.update_gold(fetcher),
             updater.update_currency(fetcher),
             updater.update_nav(fetcher), # NAV history now updates Google Sheet
+            updater.update_fred_data(fetcher), # FRED data update
         ]
         # Run all update tasks concurrently. return_exceptions=True allows all tasks to complete
         # even if some fail, and their exceptions are returned as results.
